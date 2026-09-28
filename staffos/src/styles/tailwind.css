@@ -1,0 +1,402 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&family=Inter:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Poppins:wght@300;400;500;600;700&display=swap');
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 38 92% 50%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --ring: 221 83% 53%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222 47% 8%;
+    --foreground: 210 20% 95%;
+    --card: 222 47% 11%;
+    --card-foreground: 210 20% 95%;
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --primary: 221 83% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 20% 95%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 38 92% 50%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --ring: 221 83% 60%;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    font-family: 'DM Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .font-mono {
+    font-family: 'DM Mono', monospace;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ── Dark mode color scheme ─────────────────────────────────────────────── */
+.dark {
+  color-scheme: dark;
+}
+
+/* Input / textarea dark mode */
+.dark input[type="text"],
+.dark input[type="email"],
+.dark input[type="password"],
+.dark input[type="number"],
+.dark input[type="date"],
+.dark input[type="time"],
+.dark textarea {
+  color: rgb(226 232 240);
+  background-color: rgb(30 41 59);
+  border-color: rgb(51 65 85);
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: rgb(100 116 139);
+}
+
+/* Select dark mode */
+.dark select {
+  color: rgb(226 232 240);
+  background-color: rgb(30 41 59);
+  border-color: rgb(51 65 85);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+}
+
+@layer components {
+  .sidebar-nav-item {
+    @apply flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer select-none min-h-[44px] lg:min-h-0;
+  }
+
+  .sidebar-nav-item-active {
+    @apply bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300;
+  }
+
+  .sidebar-nav-item-inactive {
+    @apply text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100;
+  }
+
+  .metric-card {
+    @apply bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 shadow-sm;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs leading-none;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-700 text-white text-sm font-semibold rounded-lg hover:bg-blue-800 active:scale-95 transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95 transition-all duration-150;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-95 transition-all duration-150;
+  }
+
+  .input-field {
+    @apply w-full px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 transition-all duration-150;
+  }
+
+  .status-present {
+    @apply bg-emerald-50 text-emerald-700 border border-emerald-200;
+  }
+
+  .status-late {
+    @apply bg-amber-50 text-amber-700 border border-amber-200;
+  }
+
+  .status-absent {
+    @apply bg-red-50 text-red-700 border border-red-200;
+  }
+
+  .status-leave {
+    @apply bg-blue-50 text-blue-700 border border-blue-200;
+  }
+
+  .status-wfh {
+    @apply bg-purple-50 text-purple-700 border border-purple-200;
+  }
+}
+
+/* ── Global select / dropdown fix ─────────────────────────────────────────── */
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  padding-right: 2rem !important;
+  min-height: 2.5rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: #1e293b;
+  background-color: #ffffff;
+  cursor: pointer;
+}
+
+select:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+  border-color: #3b82f6;
+}
+
+/* Prevent iOS from zooming in on focus by ensuring font-size >= 16px on mobile */
+@media (max-width: 768px) {
+  select,
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="number"],
+  input[type="date"],
+  input[type="time"],
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* ── iOS/Android safe area & viewport fixes ─────────────────────────────── */
+html, body {
+  /* Prevent overscroll bounce on iOS */
+  overscroll-behavior: none;
+  /* Use dynamic viewport height to account for iOS address bar */
+  min-height: 100dvh;
+}
+
+/* Safe area insets for notch/home indicator */
+.safe-top {
+  padding-top: max(env(safe-area-inset-top), 0px);
+}
+
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+
+/* Prevent text size adjustment on orientation change */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Fix tap highlight on mobile */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent double-tap zoom on buttons */
+button, a {
+  touch-action: manipulation;
+}
+
+/* Fix sidebar scroll on mobile */
+.sidebar-scroll {
+  -webkit-overflow-scrolling: touch;
+  overflow-y: auto;
+}
+
+/* Prevent content from going under iOS home indicator */
+.main-content {
+  padding-bottom: max(env(safe-area-inset-bottom), 16px);
+}
+
+/* ── Additional iOS/Android layout fixes ────────────────────────────────── */
+
+/* Fix fixed/sticky modals on iOS — prevent layout shift when keyboard opens */
+.fixed {
+  -webkit-transform: translateZ(0);
+}
+
+/* Prevent iOS momentum scroll from causing layout shifts inside modals */
+.overflow-y-auto,
+.overflow-y-scroll {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Fix iOS input zoom — ensure all inputs/selects use at least 16px */
+@media (max-width: 768px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+    /* Prevent iOS from auto-zooming on focus */
+    transform: translateZ(0);
+  }
+
+  /* Fix modal/dialog bottom sheet on iOS — account for home indicator */
+  [role="dialog"],
+  .modal-sheet {
+    padding-bottom: max(env(safe-area-inset-bottom), 16px);
+  }
+
+  /* Prevent layout shift when virtual keyboard opens on Android */
+  .flex-col {
+    min-height: 0;
+  }
+
+  /* Fix table overflow on small screens */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  /* Ensure buttons have adequate touch targets on mobile */
+  button:not([class*="w-"]):not([class*="h-"]) {
+    min-height: 44px;
+  }
+}
+
+/* Fix iOS Safari 100vh issue — use dvh where supported */
+@supports (height: 100dvh) {
+  .h-screen {
+    height: 100dvh;
+  }
+  .min-h-screen {
+    min-height: 100dvh;
+  }
+  .max-h-screen {
+    max-height: 100dvh;
+  }
+}
+
+/* Fix Android Chrome address bar layout shift */
+@supports (height: 100svh) {
+  .h-\[100dvh\] {
+    height: 100svh;
+  }
+}
+
+/* Prevent iOS rubber-band scroll from showing white gaps */
+body {
+  background-attachment: fixed;
+}
+
+/* Fix form inputs on iOS — remove inner shadow */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="date"],
+input[type="time"],
+input[type="search"],
+textarea {
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: 0.5rem;
+}
+
+/* Fix select on iOS */
+select {
+  -webkit-appearance: none;
+}
+
+/* Prevent iOS from adding blue highlight on tapped elements */
+input,
+textarea,
+select,
+button {
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+  outline: none;
+}
+
+/* Fix sticky headers on iOS Safari */
+.sticky {
+  position: -webkit-sticky;
+  position: sticky;
+}
+
+/* Safe area for bottom navigation / action bars */
+.safe-area-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 8px);
+}
+
+/* Safe area for top bars with notch */
+.safe-area-top {
+  padding-top: max(env(safe-area-inset-top), 8px);
+}
+
+/* Fix overflow hidden on iOS — needed for modals */
+.overflow-hidden {
+  -webkit-overflow-scrolling: auto;
+}
+
+/* Prevent text selection on interactive elements (reduces accidental selection on mobile) */
+button,
+[role="button"],
+label {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+@layer utilities {
+  /* ── Safe-area utilities for notch / dynamic island / gesture nav ─── */
+  .safe-top    { padding-top:    env(safe-area-inset-top); }
+  .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+  .safe-left   { padding-left:   env(safe-area-inset-left); }
+  .safe-right  { padding-right:  env(safe-area-inset-right); }
+  .safe-x      { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  .safe-y      { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .safe-all    { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+
+  /* Minimum safe-area padding (ensures at least 8px even when inset is 0) */
+  .safe-top-min    { padding-top:    max(env(safe-area-inset-top), 8px); }
+  .safe-bottom-min { padding-bottom: max(env(safe-area-inset-bottom), 8px); }
+
+  /* Full-height that accounts for safe areas */
+  .h-safe-screen { height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+  .min-h-safe-screen { min-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+}
+/* ─────────────────────────────────────────────────────────────────────────── */
