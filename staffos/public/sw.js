@@ -11,6 +11,9 @@ const STATIC_ASSETS = [
   '/assets/images/no_image.png',
 ];
 
+
+
+
 // Install: cache only static shell assets, skip waiting immediately
 self.addEventListener('install', (event) => {
   event.waitUntil(
