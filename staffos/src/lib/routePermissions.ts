@@ -24,6 +24,7 @@ export const MANAGER_PLUS_ROUTES = [
   '/leave-admin',
   '/all-tasks',
   '/task-analytics',
+  '/holiday-management',
 ];
 
 export function isRoleAllowed(pathname: string, role: string | null | undefined): boolean {

@@ -80,6 +80,8 @@ export default function ExpenseCentre() {
     amount: '',
     expense_date: new Date().toISOString().split('T')[0],
   });
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+  const [editingClarificationNote, setEditingClarificationNote] = useState('');
 
   const fetchExpenses = useCallback(async (role: string) => {
     const uid = effectiveUserId;
@@ -153,6 +155,29 @@ export default function ExpenseCentre() {
     }
   };
 
+  const openEditExpense = (expense: any) => {
+    setEditingExpenseId(expense.id);
+    setEditingClarificationNote(expense.clarification_notes || '');
+    setForm({
+      title: expense.title || '',
+      description: expense.description || '',
+      category: expense.category || 'Travel',
+      amount: String(expense.amount ?? ''),
+      expense_date: expense.expense_date || new Date().toISOString().split('T')[0],
+    });
+    setUploadedFileUrl(expense.receipt_url || '');
+    setShowForm(true);
+  };
+
+  const closeExpenseForm = () => {
+    setShowForm(false);
+    setEditingExpenseId(null);
+    setEditingClarificationNote('');
+    setForm({ title: '', description: '', category: 'Travel', amount: '', expense_date: new Date().toISOString().split('T')[0] });
+    setUploadedFileUrl('');
+    setUploadedFileName('');
+  };
+
   const handleSubmit = async () => {
     if (!form.title.trim() || !form.amount || parseFloat(form.amount) <= 0) {
       toast.error('Please fill in title and a valid amount'); return;
@@ -161,6 +186,27 @@ export default function ExpenseCentre() {
     if (!uid) { toast.error('Please log in to submit expenses'); return; }
     setSubmitting(true);
     try {
+      if (editingExpenseId) {
+        // Edit-and-resubmit: send it back into the review queue, keep the
+        // clarification note on the row (visible in history) but clear the
+        // "waiting on employee" flag now that they've responded.
+        const { error } = await supabase.from('expenses').update({
+          title: form.title,
+          description: form.description,
+          category: form.category,
+          amount: parseFloat(form.amount),
+          expense_date: form.expense_date,
+          receipt_url: uploadedFileUrl || null,
+          status: 'pending',
+          clarification_requested: false,
+        }).eq('id', editingExpenseId);
+        if (error) throw error;
+        toast.success('Expense resubmitted for approval');
+        closeExpenseForm();
+        fetchExpenses(userRole);
+        return;
+      }
+
       const { data: submitterProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', uid).single();
       const insertData: Record<string, any> = {
         user_id: uid,
@@ -185,10 +231,7 @@ export default function ExpenseCentre() {
         }
       }
       toast.success('Expense submitted for approval');
-      setForm({ title: '', description: '', category: 'Travel', amount: '', expense_date: new Date().toISOString().split('T')[0] });
-      setUploadedFileUrl('');
-      setUploadedFileName('');
-      setShowForm(false);
+      closeExpenseForm();
       fetchExpenses(userRole);
     } catch (err: any) {
       toast.error(err.message || 'Failed to submit expense');
@@ -419,6 +462,14 @@ export default function ExpenseCentre() {
                         <StatusIcon size={10} />
                         <span className="hidden sm:inline">{sc.label}</span>
                       </span>
+                      {expense.clarification_requested && expense.status === 'under_review' && expense.user_id === effectiveUserId && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); openEditExpense(expense); }}
+                          className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white flex-shrink-0"
+                        >
+                          Edit & Resubmit
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -433,12 +484,21 @@ export default function ExpenseCentre() {
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-white dark:bg-slate-800 rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
-              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">New Expense</h3>
-              <button onClick={() => { setShowForm(false); setUploadedFileUrl(''); setUploadedFileName(''); }}
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">{editingExpenseId ? 'Edit & Resubmit Expense' : 'New Expense'}</h3>
+              <button onClick={closeExpenseForm}
                 className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
                 <X size={18} className="text-slate-500" />
               </button>
             </div>
+            {editingExpenseId && editingClarificationNote && (
+              <div className="mx-6 mt-4 flex items-start gap-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+                <MessageSquare size={15} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">Reviewer asked for clarification</p>
+                  <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">{editingClarificationNote}</p>
+                </div>
+              </div>
+            )}
             <div className="px-6 py-5 space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Title *</label>
@@ -500,14 +560,14 @@ export default function ExpenseCentre() {
               </div>
             </div>
             <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/30">
-              <button onClick={() => { setShowForm(false); setUploadedFileUrl(''); setUploadedFileName(''); }}
+              <button onClick={closeExpenseForm}
                 className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors">
                 Cancel
               </button>
               <button onClick={handleSubmit} disabled={submitting}
                 className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2">
                 {submitting ? <Loader2 size={14} className="animate-spin" /> : null}
-                {submitting ? 'Submitting…' : 'Submit Expense'}
+                {submitting ? (editingExpenseId ? 'Resubmitting…' : 'Submitting…') : (editingExpenseId ? 'Resubmit for Approval' : 'Submit Expense')}
               </button>
             </div>
           </div>

@@ -170,7 +170,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
   };
 
   const filteredNavItems = navItems.filter((item) => {
-    const mgmtOnly = ['nav-live-map', 'nav-audit', 'nav-audit-log', 'nav-leave-admin'];
+    const mgmtOnly = ['nav-live-map', 'nav-audit', 'nav-leave-admin', 'nav-holidays'];
     if (mgmtOnly.includes(item.id)) return isManagerOrDirector;
     return true;
   });

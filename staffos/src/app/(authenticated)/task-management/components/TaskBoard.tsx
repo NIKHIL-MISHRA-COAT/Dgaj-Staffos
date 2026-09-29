@@ -290,6 +290,8 @@ export default function TaskBoard() {
   const [collaboratorIds, setCollaboratorIds] = useState<string[]>([]);
   const [taskCollaborators, setTaskCollaborators] = useState<Record<string, any[]>>({});
   const [savingCollaborators, setSavingCollaborators] = useState(false);
+  const [myPendingInvites, setMyPendingInvites] = useState<any[]>([]);
+  const [respondingInviteId, setRespondingInviteId] = useState<string | null>(null);
   // My Tasks section filters
   const [myTasksSearch, setMyTasksSearch] = useState('');
   const [myTasksCollapsed, setMyTasksCollapsed] = useState(false);
@@ -423,7 +425,20 @@ export default function TaskBoard() {
     if (!uid) return;
     setLoading(true);
     try {
-      const [profileRes, usersRes, tasksRes, orgsRes, catsRes] = await Promise.all([
+      const { data: visibleFirmIds } = await supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'tasks' });
+
+      // Real (PIN-session-safe) task visibility scoping — the DB-side RLS
+      // policy is best-effort for PIN sessions (no auth.uid()), so this
+      // query is what actually enforces it day to day:
+      //   employee  -> own tasks only (created / assigned / collaborator)
+      //   manager   -> every task in their visible firm(s)
+      //   director  -> everything
+      let tasksQuery = supabase
+        .from('tasks')
+        .select('id, title, description, priority, status, due_date, due_time, assigned_to, assigned_to_user_id, assigned_to_name, assigned_to_dept, assigned_by_name, assigned_by_dept, assigned_user_ids, checklist, tags, recurring, notify_before_minutes, is_overdue, is_template, task_category, client_org_id, client_org_name, organisation_relates_to, last_completed_date, created_at, notes, is_flagged, flag_reason, helper_user_ids, is_active, reminder_times, firm_id')
+        .order('created_at', { ascending: false });
+
+      const [profileRes, usersRes, myCollabRowsRes, orgsRes, catsRes] = await Promise.all([
         supabase
           .from('user_profiles')
           .select('role, full_name, department')
@@ -433,10 +448,7 @@ export default function TaskBoard() {
           .from('user_profiles')
           .select('id, full_name, role, department, job_title')
           .order('full_name', { ascending: true }),
-        supabase
-          .from('tasks')
-                    .select('id, title, description, priority, status, due_date, due_time, assigned_to, assigned_to_user_id, assigned_to_name, assigned_to_dept, assigned_by_name, assigned_by_dept, assigned_user_ids, checklist, tags, recurring, notify_before_minutes, is_overdue, is_template, task_category, client_org_id, client_org_name, organisation_relates_to, last_completed_date, created_at, notes, is_flagged, flag_reason, helper_user_ids, is_active, reminder_times')
-          .order('created_at', { ascending: false }),
+        supabase.from('task_collaborators').select('task_id').eq('user_id', uid).eq('status', 'accepted'),
         supabase
           .from('client_organisations')
           .select('id, name')
@@ -446,6 +458,27 @@ export default function TaskBoard() {
           .select('id, name, slug, color')
           .order('name', { ascending: true }),
       ]);
+
+      const myAcceptedCollabTaskIds = (myCollabRowsRes.data || []).map((r: any) => r.task_id);
+      const role0 = profileRes.data?.role || 'employee';
+      if (role0 === 'employee') {
+        const orParts = [
+          `created_by.eq.${uid}`,
+          `assigned_to.eq.${uid}`,
+          `assigned_to_user_id.eq.${uid}`,
+          `assigned_user_ids.cs.{${uid}}`,
+          `helper_user_ids.cs.{${uid}}`,
+        ];
+        if (myAcceptedCollabTaskIds.length > 0) {
+          orParts.push(`id.in.(${myAcceptedCollabTaskIds.join(',')})`);
+        }
+        tasksQuery = tasksQuery.or(orParts.join(','));
+      } else if ((role0 === 'manager' || role0 === 'executive') && visibleFirmIds) {
+        tasksQuery = tasksQuery.in('firm_id', visibleFirmIds);
+      }
+      // director: no filter — sees everything
+
+      const tasksRes = await tasksQuery;
 
       if (profileRes.data) {
         setUserRole(profileRes.data.role || 'employee');
@@ -1072,6 +1105,46 @@ export default function TaskBoard() {
     if (data) setTaskCollaborators(prev => ({ ...prev, [taskId]: data }));
   }, [supabase]);
 
+  const fetchMyPendingInvites = useCallback(async () => {
+    const uid = effectiveUserId;
+    if (!uid) return;
+    const { data } = await supabase
+      .from('task_collaborators')
+      .select('id, task_id, role, invited_by_name, created_at, tasks(title, status)')
+      .eq('user_id', uid)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+    // A task could have been completed after the invite was sent — don't
+    // show a request to collaborate on something already done.
+    setMyPendingInvites((data || []).filter((inv: any) => inv.tasks?.status !== 'done'));
+  }, [supabase, effectiveUserId]);
+
+  const respondToInvite = async (inviteId: string, taskId: string, accept: boolean) => {
+    setRespondingInviteId(inviteId);
+    try {
+      if (accept) {
+        const { error } = await supabase.from('task_collaborators')
+          .update({ status: 'accepted', accepted_at: new Date().toISOString() })
+          .eq('id', inviteId);
+        if (error) throw error;
+        toast.success('Collaboration request accepted');
+      } else {
+        const { error } = await supabase.from('task_collaborators').delete().eq('id', inviteId);
+        if (error) throw error;
+        toast.success('Collaboration request declined');
+      }
+      setMyPendingInvites(prev => prev.filter(i => i.id !== inviteId));
+      fetchTaskCollaborators(taskId);
+      if (accept) fetchAllData();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to respond to request');
+    } finally {
+      setRespondingInviteId(null);
+    }
+  };
+
+  useEffect(() => { fetchMyPendingInvites(); }, [fetchMyPendingInvites]);
+
   const handleSaveCollaborators = async () => {
     if (!showCollaboratorModal) return;
     const uid = effectiveUserId;
@@ -1099,11 +1172,15 @@ export default function TaskBoard() {
             invited_by: uid,
             invited_by_name: userName,
             role: 'collaborator',
-            status: 'accepted',
-            accepted_at: new Date().toISOString(),
+            status: 'pending',
           };
         });
-        await supabase.from('task_collaborators').insert(inserts);
+        const { error: collabErr } = await supabase.from('task_collaborators').insert(inserts);
+        if (collabErr) {
+          toast.error(collabErr.message?.includes('completed') ? 'Cannot invite collaborators on a completed task' : 'Failed to send collaboration request');
+          setSavingCollaborators(false);
+          return;
+        }
       }
 
       if (toRemove.length > 0) {
@@ -1223,6 +1300,37 @@ export default function TaskBoard() {
   return (
     <div className="max-w-screen-2xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
       <Toaster position="bottom-right" richColors />
+
+      {/* Pending collaboration requests — invites sent to me, awaiting my response */}
+      {myPendingInvites.length > 0 && (
+        <div className="mb-4 rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-3.5 space-y-2">
+          <p className="text-xs font-700 text-indigo-700 dark:text-indigo-300 flex items-center gap-1.5">
+            <Users size={13} /> {myPendingInvites.length} collaboration request{myPendingInvites.length > 1 ? 's' : ''} waiting for your response
+          </p>
+          {myPendingInvites.map((inv: any) => (
+            <div key={inv.id} className="flex items-center gap-2 bg-white dark:bg-slate-800 rounded-xl px-3 py-2 border border-indigo-100 dark:border-indigo-800">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-600 text-slate-800 dark:text-slate-100 truncate">{inv.tasks?.title || 'Untitled task'}</p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">{inv.invited_by_name || 'Someone'} invited you as {inv.role}</p>
+              </div>
+              <button
+                disabled={respondingInviteId === inv.id}
+                onClick={() => respondToInvite(inv.id, inv.task_id, true)}
+                className="text-xs font-600 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50"
+              >
+                Accept
+              </button>
+              <button
+                disabled={respondingInviteId === inv.id}
+                onClick={() => respondToInvite(inv.id, inv.task_id, false)}
+                className="text-xs font-600 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50"
+              >
+                Decline
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Header */}
       <div className="flex items-start justify-between mb-5 gap-3">
@@ -2759,28 +2867,37 @@ export default function TaskBoard() {
                   { label: 'Employees', roles: ['employee', 'staff'] },
                 ]}
               />
+              {showCollaboratorModal.status === 'done' && (
+                <p className="text-xs font-600 text-red-600 bg-red-50 dark:bg-red-900/20 rounded-lg p-2.5">
+                  This task is completed — new collaboration requests can no longer be sent.
+                </p>
+              )}
               {/* Show current collaborators */}
               {(taskCollaborators[showCollaboratorModal.id] || []).length > 0 && (
                 <div>
-                  <p className="text-xs font-600 text-slate-600 dark:text-slate-400 mb-2">Current Collaborators</p>
+                  <p className="text-xs font-600 text-slate-600 dark:text-slate-400 mb-2">Collaborators</p>
                   <div className="flex flex-wrap gap-1.5">
                     {(taskCollaborators[showCollaboratorModal.id] || []).map((c: any) => (
-                      <span key={c.id} className="inline-flex items-center gap-1 text-xs bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full font-500">
+                      <span key={c.id} className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-500 ${
+                        c.status === 'pending' ? 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
+                        : c.status === 'declined' ? 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 line-through'
+                        : 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300'
+                      }`}>
                         <Users size={10} />
                         {c.user_profiles?.full_name || 'Unknown'}
-                        <span className="text-[10px] text-indigo-400">({c.role})</span>
+                        <span className="text-[10px] opacity-70">({c.status === 'pending' ? 'pending' : c.status === 'declined' ? 'declined' : c.role})</span>
                       </span>
                     ))}
                   </div>
                 </div>
               )}
               <p className="text-[11px] text-slate-400 dark:text-slate-500 bg-slate-50 dark:bg-slate-700/40 rounded-lg p-2.5">
-                💡 Collaborators are added to the task's helper list and can see this task in their workspace.
+                💡 Invited collaborators must accept before they're added — they'll see a request to respond to.
               </p>
             </div>
             <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700">
               <button onClick={() => setShowCollaboratorModal(null)} className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 text-sm font-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">Cancel</button>
-              <button onClick={handleSaveCollaborators} disabled={savingCollaborators}
+              <button onClick={handleSaveCollaborators} disabled={savingCollaborators || showCollaboratorModal.status === 'done'}
                 className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-600 transition-colors disabled:opacity-60">
                 <UserPlus size={14} />{savingCollaborators ? 'Saving…' : 'Save Collaborators'}
               </button>

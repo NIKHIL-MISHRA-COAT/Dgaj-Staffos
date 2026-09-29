@@ -29,7 +29,7 @@ const navItems: NavItem[] = [
   { id: 'nav-audit', label: 'Attendance Audit', icon: ClipboardList, href: '/attendance-audit', group: 'core', managerOnly: true },
   { id: 'nav-leave', label: 'Leave Dashboard', icon: CalendarDays, href: '/leave-management', group: 'core' },
   { id: 'nav-leave-admin', label: 'Leave Admin', icon: BookMarked, href: '/leave-admin', group: 'core', managerOnly: true },
-  { id: 'nav-holidays', label: 'Holiday Management', icon: Palmtree, href: '/holiday-management', group: 'core' },
+  { id: 'nav-holidays', label: 'Holiday Management', icon: Palmtree, href: '/holiday-management', group: 'core', managerOnly: true },
   { id: 'nav-payroll', label: 'Payroll', icon: Wallet, href: '/payroll', group: 'core' },
   { id: 'nav-profile', label: 'My Profile', icon: UserCircle, href: '/employee-profile', group: 'core' },
 
