@@ -1,0 +1,44 @@
+{
+    "name": "DGaj Connect",
+    "short_name": "DGaj Connect",
+    "description": "DGaj Connect — Workforce Operations Platform for attendance, tasks, leave, and team communication.",
+    "start_url": "/employee-dashboard",
+    "scope": "/",
+    "display": "standalone",
+    "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+    "orientation": "portrait-primary",
+    "background_color": "#0f172a",
+    "theme_color": "#0f172a",
+    "categories": [
+        "business",
+        "productivity"
+    ],
+    "icons": [
+        {
+            "src": "/assets/images/DGaj_Logo_Black-1776504240302.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/assets/images/DGaj_Logo_Black-1776504240302.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "maskable"
+        },
+        {
+            "src": "/assets/images/DGaj_Logo_Black-1776504240302.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/assets/images/DGaj_Logo_Black-1776504240302.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
+        }
+    ],
+    "screenshots": [],
+    "prefer_related_applications": false
+}
