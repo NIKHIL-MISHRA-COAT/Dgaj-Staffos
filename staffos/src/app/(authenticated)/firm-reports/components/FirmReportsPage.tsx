@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Building2, TrendingUp, Users, CheckSquare, Calendar, Clock, Layers, RefreshCw, Download, Printer,
+  Building2, TrendingUp, Users, CheckSquare, Calendar, Clock, Layers, RefreshCw, Download, Printer, Wallet, Receipt, CalendarDays,
 } from 'lucide-react';
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ComposedChart, LabelList, Legend,
@@ -16,13 +16,33 @@ import { createClient } from '@/lib/supabase/client';
 type Period = 'daily' | 'weekly' | 'monthly';
 interface Firm { id: string; name: string; code: string; }
 type Rec = { firm: string; day: number; status: string };
-type EmpRec = { firm: string; role: string };
-type Source = { firms: Firm[]; tasks: Rec[]; attendance: Rec[]; leaves: Rec[]; employees: EmpRec[]; todayNum: number };
+type EmpRec = { id: string; firm: string; role: string };
+type PayRec = { firm: string; emp: string; key: string; gross: number; present: number; absent: number; perDay: number; deducted: number; net: number; status: string };
+type ExpRec = { firm: string; emp: string; day: number; category: string; amount: number; reimbursed: number; status: string };
+type StaffRec = { emp: string; day: number; status: string };
+type Holiday = { day: number; name: string };
+type Source = {
+  firms: Firm[]; tasks: Rec[]; attendance: Rec[]; leaves: Rec[]; employees: EmpRec[]; todayNum: number;
+  payroll: PayRec[]; expenses: ExpRec[]; holidays: Holiday[]; names: Record<string, string>;
+  staffAtt: StaffRec[]; staffTasks: StaffRec[]; warn: Record<string, string>;
+};
 
 const UNASSIGNED = '__unassigned';
 const WINDOW = 62; // days loaded, enough for the current and previous month-to-date
 const PRESENT_LIKE = ['present', 'half_day', 'work_from_home']; // same rule as before
-const EMPTY: Source = { firms: [], tasks: [], attendance: [], leaves: [], employees: [], todayNum: 0 };
+const EMPTY: Source = {
+  firms: [], tasks: [], attendance: [], leaves: [], employees: [], todayNum: 0,
+  payroll: [], expenses: [], holidays: [], names: {}, staffAtt: [], staffTasks: [], warn: {},
+};
+
+/* Columns for the newer sections (payroll, expenses, holidays, staff scorecard).
+   If a section says it isn't connected, fix the table or column names here. */
+const SCHEMA = {
+  payroll: { table: 'payroll_records', emp: 'user_id', firm: 'firm_id', month: 'month', gross: 'gross_salary', present: 'present_days', absent: 'absent_days', perDay: 'deduction_per_day', deducted: 'total_deduction', net: 'net_salary', status: 'status' },
+  expenses: { table: 'expenses', emp: 'user_id', firm: 'firm_id', date: 'created_at', category: 'category', amount: 'amount', reimbursed: 'reimbursed_amount', status: 'status' },
+  holidays: { table: 'holidays', date: 'holiday_date', name: 'name' },
+  staff: { name: 'full_name', attEmp: 'user_id', taskEmp: 'assigned_to' },
+} as const;
 
 const C = { teal: '#0d9488', amber: '#f59e0b', sky: '#0ea5e9', rose: '#e11d48', indigo: '#4f46e5', violet: '#7c3aed', slate: '#94a3b8', grid: 'rgba(148,163,184,0.25)' };
 const PALETTE = [C.teal, C.indigo, C.amber, C.sky, C.rose, C.violet, C.slate];
@@ -35,6 +55,10 @@ const label = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1).replace
 
 /* ---------------------------------------------------------------- helpers */
 const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 100) : 0);
+const num = (v: any) => { const n = Number(v); return isFinite(n) ? n : 0; };
+const inr = (n: number) => '₹' + new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(Math.round(n));
+const compact = (n: number) => (n >= 1e7 ? (n / 1e7).toFixed(2) + ' Cr' : n >= 1e5 ? (n / 1e5).toFixed(1) + ' L' : n >= 1e3 ? (n / 1e3).toFixed(0) + 'K' : String(Math.round(n)));
+const chg = (a: number, b: number) => (b ? ((a - b) / b) * 100 : 0);
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const numOfDate = (d: Date) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000;
 const numOfYmd = (s: string) => { const [y, m, d] = s.slice(0, 10).split('-').map(Number); return Date.UTC(y, m - 1, d) / 86400000; };
@@ -68,18 +92,63 @@ async function loadAll(supabase: any): Promise<Source> {
   if (firmsRes.error) throw firmsRes.error;
 
   const fk = (v: any) => v || UNASSIGNED;
+  const empFirm = new Map<string, string>(employees.map((r: any) => [String(r.id), fk(r.firm_id)]));
+
+  // newer sections load independently, one failing never breaks the rest of the page
+  const warn: Record<string, string> = {};
+  const opt = async (key: string, run: () => Promise<any[]>): Promise<any[]> => {
+    try { return await run(); } catch (e: any) { warn[key] = e?.message ?? 'query failed'; return []; }
+  };
+  const P = SCHEMA.payroll; const X = SCHEMA.expenses; const H = SCHEMA.holidays; const S = SCHEMA.staff;
+  const [payRows, expRows, holRows, nameRows, sAtt, sTask] = await Promise.all([
+    opt('payroll', () => fetchAll(() => supabase.from(P.table).select('*').order('id'))),
+    opt('expenses', () => fetchAll(() => supabase.from(X.table).select('*').gte(X.date, sinceIso).order('id'))),
+    opt('holidays', () => fetchAll(() => supabase.from(H.table).select('*').gte(H.date, sinceDate).order('id'))),
+    opt('staff', () => fetchAll(() => supabase.from('user_profiles').select(`id, ${S.name}`).eq('is_active', true).order('id'))),
+    opt('staff', () => fetchAll(() => supabase.from('attendance_records').select(`id, ${S.attEmp}, status, work_date`).gte('work_date', sinceDate).order('id'))),
+    opt('staff', () => fetchAll(() => supabase.from('tasks').select(`id, ${S.taskEmp}, status, created_at`).gte('created_at', sinceIso).order('id'))),
+  ]);
+
+  const payroll: PayRec[] = payRows.map((r: any) => {
+    const emp = String(r[P.emp] ?? '');
+    const gross = num(r[P.gross]); const absent = num(r[P.absent]);
+    const perDay = r[P.perDay] != null ? num(r[P.perDay]) : 1000;
+    const deducted = r[P.deducted] != null ? num(r[P.deducted]) : absent * perDay;
+    const net = r[P.net] != null ? num(r[P.net]) : gross - deducted;
+    return { firm: r[P.firm] || empFirm.get(emp) || UNASSIGNED, emp, key: String(r[P.month] ?? r.created_at ?? '').slice(0, 7), gross, present: num(r[P.present]), absent, perDay, deducted, net, status: String(r[P.status] ?? '').toLowerCase() };
+  }).filter((p: PayRec) => /^\d{4}-\d{2}$/.test(p.key));
+
+  const expenses: ExpRec[] = expRows.map((r: any) => {
+    const st = String(r[X.status] ?? '').toLowerCase();
+    const status = st.includes('reimburs') ? 'reimbursed' : st.includes('approv') ? 'approved' : st.includes('return') || st.includes('clarif') ? 'returned' : st.includes('reject') ? 'rejected' : 'pending';
+    const amount = num(r[X.amount]);
+    const emp = String(r[X.emp] ?? '');
+    return {
+      firm: r[X.firm] || empFirm.get(emp) || UNASSIGNED, emp, day: numOfDate(new Date(r[X.date])),
+      category: label(String(r[X.category] ?? 'other').toLowerCase()), amount,
+      reimbursed: r[X.reimbursed] != null ? num(r[X.reimbursed]) : status === 'reimbursed' ? amount : 0, status,
+    };
+  });
+
+  const names: Record<string, string> = {};
+  nameRows.forEach((r: any) => { names[String(r.id)] = r[S.name] ?? 'Employee'; });
+
   return {
     firms: (firmsRes.data as Firm[]) || [],
     tasks: tasks.map((r) => ({ firm: fk(r.firm_id), day: numOfDate(new Date(r.created_at)), status: String(r.status ?? '').toLowerCase() })),
     attendance: attendance.map((r) => ({ firm: fk(r.firm_id), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
     leaves: leaves.map((r) => ({ firm: fk(r.firm_id), day: numOfDate(new Date(r.created_at)), status: '' })),
-    employees: employees.map((r) => ({ firm: fk(r.firm_id), role: String(r.role ?? 'employee').toLowerCase() })),
+    employees: employees.map((r) => ({ id: String(r.id), firm: fk(r.firm_id), role: String(r.role ?? 'employee').toLowerCase() })),
     todayNum: numOfDate(today),
+    payroll, expenses, names, warn,
+    holidays: holRows.filter((r: any) => r[H.date]).map((r: any) => ({ day: numOfYmd(String(r[H.date])), name: r[H.name] ?? 'Holiday' })),
+    staffAtt: sAtt.map((r: any) => ({ emp: String(r[S.attEmp]), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
+    staffTasks: sTask.map((r: any) => ({ emp: String(r[S.taskEmp]), day: numOfDate(new Date(r.created_at)), status: String(r.status ?? '').toLowerCase() })),
   };
 }
 
 /* ------------------------------------------------------------ small parts */
-function ChartTip({ active, payload, label: l }: any) {
+function ChartTip({ active, payload, label: l, money }: any) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-md dark:border-slate-600 dark:bg-slate-800">
@@ -87,7 +156,7 @@ function ChartTip({ active, payload, label: l }: any) {
       {payload.map((p: any) => (
         <div key={String(p.dataKey) + p.name} className="flex items-center gap-2 text-slate-500 dark:text-slate-300">
           <span className="h-2 w-2 rounded-full" style={{ background: p.color || p.fill || p.payload?.color }} />
-          {p.name}: <b className="text-slate-800 dark:text-slate-100">{p.value}</b>
+          {p.name}: <b className="text-slate-800 dark:text-slate-100">{money ? inr(p.value) : p.value}</b>
         </div>
       ))}
     </div>
@@ -181,6 +250,16 @@ function Donut({ data, center, sub }: { data: { name: string; value: number; col
   );
 }
 
+function NotConnected({ what, msg, className = '' }: { what: string; msg: string; className?: string }) {
+  return (
+    <div className={`rounded-2xl border border-dashed border-amber-300 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200 ${className}`}>
+      <p className="font-semibold">{what} is not connected yet</p>
+      <p className="mt-1 opacity-80">{msg}</p>
+      <p className="mt-1 opacity-70">Fix the table or column names in SCHEMA at the top of this file.</p>
+    </div>
+  );
+}
+
 const axisProps = { tick: { fontSize: 11, fill: '#94a3b8' }, axisLine: false, tickLine: false } as const;
 
 /* ------------------------------------------------------------------- page */
@@ -196,6 +275,7 @@ export default function FirmReportsPage() {
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<'name' | 'employees' | 'tasks' | 'att' | 'leave'>('name');
   const [sortDir, setSortDir] = useState<1 | -1>(1);
+  const [showAllStaff, setShowAllStaff] = useState(false);
 
   useEffect(() => {
     if (!effectiveUserId) return;
@@ -275,12 +355,13 @@ export default function FirmReportsPage() {
       .sort((a, b) => (PRESENT_LIKE.includes(b) ? 1 : 0) - (PRESENT_LIKE.includes(a) ? 1 : 0) || a.localeCompare(b));
     const trend = Array.from({ length: 30 }, (_, i) => {
       const d = todayNum - 29 + i;
-      const row: any = { label: fmtNum(d), created: 0, done: 0, leave: 0, rate: 0 };
+      const row: any = { label: fmtNum(d), created: 0, done: 0, leave: 0, rate: 0, exp: 0 };
       attKeys.forEach((k) => { row[k] = 0; });
       let tot = 0; let pres = 0;
       attendance.forEach((r) => { if (r.day === d && pass(r.firm)) { row[r.status || 'unknown']++; tot++; if (PRESENT_LIKE.includes(r.status)) pres++; } });
       tasks.forEach((r) => { if (r.day === d && pass(r.firm)) { row.created++; if (r.status === 'done') row.done++; } });
       leaves.forEach((r) => { if (r.day === d && pass(r.firm)) row.leave++; });
+      src.expenses.forEach((x) => { if (x.day === d && pass(x.firm)) row.exp += x.amount; });
       row.rate = pct(pres, tot);
       return row;
     });
@@ -296,8 +377,65 @@ export default function FirmReportsPage() {
       return { id, name: nameOf(id), cells };
     });
 
+    // payroll: last 6 months, follows the firm filter
+    const monthKeys = Array.from({ length: 6 }, (_, i) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (5 - i), 1)).toISOString().slice(0, 7));
+    const monthName = (k: string) => new Date(k + '-01T00:00:00Z').toLocaleString('en-IN', { month: 'short', timeZone: 'UTC' });
+    const payF = src.payroll.filter((p) => pass(p.firm));
+    const isPending = (st: string) => /pending|draft|review|submitted/.test(st);
+    const payMonths = monthKeys.map((key) => {
+      const rows = payF.filter((p) => p.key === key);
+      const sum = (f: (p: PayRec) => number) => rows.reduce((t, p) => t + f(p), 0);
+      return { key, month: monthName(key), Gross: sum((p) => p.gross), Net: sum((p) => p.net), Deductions: sum((p) => p.deducted), Absent: sum((p) => p.absent), Present: sum((p) => p.present), slips: rows.length, pending: rows.filter((p) => isPending(p.status)).length };
+    });
+    const latestIdx = (() => { for (let i = 5; i >= 0; i--) if (payMonths[i].slips > 0) return i; return 5; })();
+    const payLatest = payMonths[latestIdx];
+    const payPrev = latestIdx > 0 ? payMonths[latestIdx - 1] : null;
+    const payStatusMap = new Map<string, number>();
+    payF.filter((p) => p.key === payLatest.key).forEach((p) => payStatusMap.set(p.status || 'unknown', (payStatusMap.get(p.status || 'unknown') ?? 0) + 1));
+    const payStatus = [...payStatusMap.entries()].map(([k, v], i) => ({ name: label(k), value: v, color: colorFor(k, i) }));
+    const payByFirm = firmIds.map((id) => {
+      const rows = src.payroll.filter((p) => p.firm === id && p.key === payLatest.key);
+      return { id, name: nameOf(id), Gross: rows.reduce((t, p) => t + p.gross, 0), Net: rows.reduce((t, p) => t + p.net, 0) };
+    });
+
+    // expenses: selected period
+    const expCur = src.expenses.filter((x) => pass(x.firm) && inCur(x.day));
+    const expPrev = src.expenses.filter((x) => pass(x.firm) && inPrev(x.day));
+    const sumA = (rs: ExpRec[]) => rs.reduce((t, x) => t + x.amount, 0);
+    const pipeline = (['pending', 'returned', 'approved', 'reimbursed', 'rejected'] as const).map((k) => {
+      const rs = expCur.filter((x) => x.status === k);
+      return { key: k, name: label(k), count: rs.length, amount: sumA(rs) };
+    });
+    const catMap = new Map<string, number>();
+    expCur.forEach((x) => catMap.set(x.category, (catMap.get(x.category) ?? 0) + x.amount));
+    const expM = {
+      claimed: sumA(expCur), claimedPrev: sumA(expPrev), reimbursed: expCur.reduce((t, x) => t + x.reimbursed, 0), pipeline,
+      cat: [...catMap.entries()].map(([category, amount]) => ({ category, amount })).sort((a, b) => b.amount - a.amount).slice(0, 8),
+      byFirm: firmIds.map((id) => {
+        const rs = src.expenses.filter((x) => x.firm === id && inCur(x.day));
+        return { id, name: nameOf(id), Claimed: sumA(rs), Reimbursed: rs.reduce((t, x) => t + x.reimbursed, 0) };
+      }),
+    };
+
+    // staff scorecard: selected period, needs-attention first
+    const grp = (rs: StaffRec[]) => { const m = new Map<string, StaffRec[]>(); rs.forEach((r) => { if (!inCur(r.day)) return; const a = m.get(r.emp) ?? []; a.push(r); m.set(r.emp, a); }); return m; };
+    const attBy = grp(src.staffAtt); const taskBy = grp(src.staffTasks);
+    const expBy = new Map<string, number>();
+    expCur.forEach((x) => expBy.set(x.emp, (expBy.get(x.emp) ?? 0) + x.amount));
+    const staff = empF.map((e) => {
+      const a = attBy.get(e.id) ?? []; const t = taskBy.get(e.id) ?? [];
+      const present = a.filter((r) => PRESENT_LIKE.includes(r.status)).length;
+      return {
+        id: e.id, name: src.names[e.id] ?? 'Employee', firm: nameOf(e.firm), attRate: a.length ? pct(present, a.length) : null,
+        late: a.filter((r) => r.status.includes('late')).length, absent: a.filter((r) => r.status.includes('absent')).length,
+        done: t.filter((r) => r.status === 'done').length, tasks: t.length, claimed: expBy.get(e.id) ?? 0,
+      };
+    }).sort((a, b) => (b.absent + b.late) - (a.absent + a.late) || (a.attRate ?? 101) - (b.attRate ?? 101));
+    const holidaysNext = src.holidays.filter((h) => h.day >= todayNum).sort((a, b) => a.day - b.day).slice(0, 6);
+
     return {
       cur, prev, empF, firmRows, combined, attMix, taskMix, roleMix, trend, attKeys, heat, wk, len,
+      payMonths, payLatest, payPrev, payStatus, payByFirm, expM, staff, holidaysNext,
       rangeLabel: len === 1 ? 'Today' : `${fmtNum(startNum)} to ${fmtNum(todayNum)}`,
     };
   }, [src, period, selectedFirmId]);
@@ -410,6 +548,28 @@ export default function FirmReportsPage() {
             <Kpi icon={<Clock size={13} />} name="Attendance" value={`${attRate}%`} sub={`${cur.attPresent}/${cur.attTotal} present`} delta={<Delta value={attRate - attRatePrev} suffix=" pts" />} spark={report.trend.map((t: any) => t.rate)} color={C.teal} />
             <Kpi icon={<Clock size={13} />} name="Not Present" value={cur.attTotal - cur.attPresent} sub="Absent, leave and other statuses" delta={<Delta value={(cur.attTotal - cur.attPresent) - (prev.attTotal - prev.attPresent)} goodWhenUp={false} />} color={C.rose} />
             <Kpi icon={<Calendar size={13} />} name="Leave Requests" value={cur.leave} delta={<Delta value={cur.leave - prev.leave} neutral />} spark={report.trend.map((t: any) => t.leave)} color={C.violet} />
+          </div>
+
+          {/* payroll and expense KPIs */}
+          <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+            {src.warn.payroll ? (
+              <NotConnected what="Payroll" msg={src.warn.payroll} className="col-span-2 lg:col-span-3" />
+            ) : (
+              <>
+                <Kpi icon={<Wallet size={13} />} name={`Net Payroll (${report.payLatest.month})`} value={'₹' + compact(report.payLatest.Net)} sub={`${report.payLatest.slips} payslips`} delta={report.payPrev ? <Delta value={chg(report.payLatest.Net, report.payPrev.Net)} suffix="%" /> : undefined} spark={report.payMonths.map((m) => m.Net)} color={C.indigo} />
+                <Kpi icon={<Wallet size={13} />} name="Absence Deductions" value={inr(report.payLatest.Deductions)} sub={`${report.payLatest.Absent} absent days in ${report.payLatest.month}`} delta={report.payPrev ? <Delta value={chg(report.payLatest.Deductions, report.payPrev.Deductions)} suffix="%" goodWhenUp={false} /> : undefined} color={C.rose} />
+                <Kpi icon={<Wallet size={13} />} name="Payslips To Approve" value={report.payLatest.pending} sub={`${report.payLatest.month} payroll`} color={C.amber} />
+              </>
+            )}
+            {src.warn.expenses ? (
+              <NotConnected what="Expenses" msg={src.warn.expenses} className="col-span-2 lg:col-span-3" />
+            ) : (
+              <>
+                <Kpi icon={<Receipt size={13} />} name="Expenses Claimed" value={inr(report.expM.claimed)} sub={report.rangeLabel} delta={<Delta value={chg(report.expM.claimed, report.expM.claimedPrev)} suffix="%" neutral />} spark={report.trend.map((t: any) => t.exp)} color={C.amber} />
+                <Kpi icon={<Receipt size={13} />} name="Awaiting Approval" value={inr(report.expM.pipeline[0].amount)} sub={`${report.expM.pipeline[0].count} requests, ${report.expM.pipeline[1].count} returned for clarification`} color={C.rose} />
+                <Kpi icon={<Receipt size={13} />} name="Reimbursed" value={inr(report.expM.reimbursed)} sub={`${pct(report.expM.reimbursed, report.expM.claimed)}% of claimed`} color={C.teal} />
+              </>
+            )}
           </div>
 
           {/* attendance trend + mix */}
@@ -540,6 +700,191 @@ export default function FirmReportsPage() {
                 </ResponsiveContainer>
               </div>
             </Tile>
+          </div>
+
+          {/* payroll */}
+          {!src.warn.payroll && (
+            <>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <Tile className="lg:col-span-8" title="Payroll, last 6 months" hint="Gross, net paid and absence deductions per month">
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={report.payMonths} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke={C.grid} vertical={false} />
+                        <XAxis dataKey="month" {...axisProps} />
+                        <YAxis yAxisId="l" {...axisProps} tickFormatter={(v) => compact(v)} />
+                        <YAxis yAxisId="r" orientation="right" {...axisProps} tickFormatter={(v) => compact(v)} />
+                        <Tooltip content={<ChartTip money />} cursor={{ fill: 'rgba(148,163,184,0.12)' }} />
+                        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Bar yAxisId="l" dataKey="Gross" fill="#c7d2fe" radius={[3, 3, 0, 0]} />
+                        <Bar yAxisId="l" dataKey="Net" name="Net paid" fill={C.indigo} radius={[3, 3, 0, 0]} />
+                        <Line yAxisId="r" type="monotone" dataKey="Deductions" stroke={C.rose} strokeWidth={2} dot={{ r: 3 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Tile>
+                <Tile className="lg:col-span-4" title={`Payslips, ${report.payLatest.month}`} hint="Status of the latest payroll run">
+                  <Donut data={report.payStatus} center={String(report.payLatest.slips)} sub="payslips" />
+                  <dl className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-700/40"><dt className="text-slate-400">Days present (with paid leave)</dt><dd className="font-semibold text-slate-800 dark:text-slate-100">{report.payLatest.Present}</dd></div>
+                    <div className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-700/40"><dt className="text-slate-400">Days absent</dt><dd className="font-semibold text-slate-800 dark:text-slate-100">{report.payLatest.Absent}</dd></div>
+                  </dl>
+                </Tile>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <Tile title="Payroll by firm" hint={`Gross and net for ${report.payLatest.month}. Click a bar to filter.`}>
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={report.payByFirm} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke={C.grid} vertical={false} />
+                        <XAxis dataKey="name" {...axisProps} />
+                        <YAxis {...axisProps} tickFormatter={(v) => compact(v)} />
+                        <Tooltip content={<ChartTip money />} cursor={{ fill: 'rgba(148,163,184,0.12)' }} />
+                        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Bar dataKey="Gross" fill="#c7d2fe" radius={[3, 3, 0, 0]} cursor="pointer" onClick={(d: any) => toggleFirm(d.id)} />
+                        <Bar dataKey="Net" fill={C.indigo} radius={[3, 3, 0, 0]} cursor="pointer" onClick={(d: any) => toggleFirm(d.id)} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Tile>
+                <Tile title="Absent days by month" hint="Days that fed the deductions above">
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={report.payMonths} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                        <CartesianGrid stroke={C.grid} vertical={false} />
+                        <XAxis dataKey="month" {...axisProps} />
+                        <YAxis {...axisProps} allowDecimals={false} />
+                        <Tooltip content={<ChartTip />} cursor={{ fill: 'rgba(148,163,184,0.12)' }} />
+                        <Bar dataKey="Absent" name="Absent days" fill={C.rose} radius={[3, 3, 0, 0]}>
+                          <LabelList dataKey="Absent" position="top" style={{ fontSize: 11, fill: '#94a3b8' }} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Tile>
+              </div>
+            </>
+          )}
+
+          {/* expenses */}
+          {!src.warn.expenses && (
+            <>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <Tile className="lg:col-span-8" title="Expenses, last 30 days" hint="Amount claimed per day">
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={report.trend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke={C.grid} vertical={false} />
+                        <XAxis dataKey="label" {...axisProps} minTickGap={28} />
+                        <YAxis {...axisProps} tickFormatter={(v) => compact(v)} />
+                        <Tooltip content={<ChartTip money />} cursor={{ fill: 'rgba(148,163,184,0.12)' }} />
+                        <Bar dataKey="exp" name="Claimed" fill={C.amber} radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Tile>
+                <Tile className="lg:col-span-4" title="Approval pipeline" hint={report.rangeLabel}>
+                  <ul className="space-y-3 text-sm">
+                    {report.expM.pipeline.map((p, i) => (
+                      <li key={p.key}>
+                        <div className="flex items-center justify-between text-slate-600 dark:text-slate-300">
+                          <span>{p.name} <span className="text-xs text-slate-400">({p.count})</span></span>
+                          <span className="tabular-nums font-semibold text-slate-800 dark:text-slate-100">{inr(p.amount)}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
+                          <div className="h-full rounded-full" style={{ width: `${pct(p.amount, report.expM.claimed)}%`, background: colorFor(p.key === 'returned' ? 'overdue' : p.key === 'pending' ? 'pending' : p.key === 'rejected' ? 'absent' : 'present', i) }} />
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </Tile>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <Tile title="Expenses by category" hint={report.rangeLabel}>
+                  <div className="h-56">
+                    {report.expM.cat.length === 0 ? <Empty text="No expenses in this period" /> : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={report.expM.cat} layout="vertical" margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
+                          <CartesianGrid stroke={C.grid} horizontal={false} />
+                          <XAxis type="number" {...axisProps} tickFormatter={(v) => compact(v)} />
+                          <YAxis type="category" dataKey="category" width={90} {...axisProps} />
+                          <Tooltip content={<ChartTip money />} cursor={{ fill: 'rgba(148,163,184,0.12)' }} />
+                          <Bar dataKey="amount" name="Amount" fill={C.amber} radius={[0, 3, 3, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </Tile>
+                <Tile title="Expenses by firm" hint="Claimed against reimbursed. Click a bar to filter.">
+                  <div className="h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={report.expM.byFirm} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke={C.grid} vertical={false} />
+                        <XAxis dataKey="name" {...axisProps} />
+                        <YAxis {...axisProps} tickFormatter={(v) => compact(v)} />
+                        <Tooltip content={<ChartTip money />} cursor={{ fill: 'rgba(148,163,184,0.12)' }} />
+                        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Bar dataKey="Claimed" fill={C.amber} radius={[3, 3, 0, 0]} cursor="pointer" onClick={(d: any) => toggleFirm(d.id)} />
+                        <Bar dataKey="Reimbursed" fill={C.teal} radius={[3, 3, 0, 0]} cursor="pointer" onClick={(d: any) => toggleFirm(d.id)} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Tile>
+              </div>
+            </>
+          )}
+
+          {/* staff scorecard + holidays */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            {src.warn.staff ? (
+              <NotConnected what="Employee scorecard" msg={src.warn.staff} className="lg:col-span-8" />
+            ) : (
+              <Tile
+                className="lg:col-span-8"
+                title="Employee scorecard"
+                hint="People with the most late or absent days come first"
+                right={<button onClick={() => setShowAllStaff((v) => !v)} className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700 print:hidden">{showAllStaff ? 'Show top 8' : `Show all ${report.staff.length}`}</button>}
+              >
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] text-slate-400 font-semibold border-b border-slate-100 dark:border-slate-700">
+                        <th className="py-2 pr-3">Employee</th><th className="py-2 pr-3">Attendance</th><th className="py-2 pr-3">Late</th><th className="py-2 pr-3">Absent</th><th className="py-2 pr-3">Tasks</th><th className="py-2 pr-3">Expenses</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(showAllStaff ? report.staff : report.staff.slice(0, 8)).map((r) => (
+                        <tr key={r.id} className="border-b border-slate-50 last:border-0 dark:border-slate-700/50">
+                          <td className="py-2 pr-3"><div className="font-semibold text-slate-700 dark:text-slate-200">{r.name}</div><div className="text-[11px] text-slate-400">{r.firm}</div></td>
+                          <td className="py-2 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{r.attRate === null ? '—' : `${r.attRate}%`}</td>
+                          <td className={`py-2 pr-3 tabular-nums ${r.late ? 'font-semibold text-amber-600' : 'text-slate-400'}`}>{r.late}</td>
+                          <td className={`py-2 pr-3 tabular-nums ${r.absent ? 'font-semibold text-rose-600' : 'text-slate-400'}`}>{r.absent}</td>
+                          <td className="py-2 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{r.done}/{r.tasks}</td>
+                          <td className="py-2 pr-3 tabular-nums text-slate-600 dark:text-slate-300">{r.claimed ? inr(r.claimed) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Tile>
+            )}
+            {src.warn.holidays ? (
+              <NotConnected what="Holidays" msg={src.warn.holidays} className="lg:col-span-4" />
+            ) : (
+              <Tile className="lg:col-span-4" title="Upcoming holidays" hint="Nobody is auto-marked absent on these days">
+                {report.holidaysNext.length === 0 ? <Empty text="No upcoming holidays" /> : (
+                  <ul className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
+                    {report.holidaysNext.map((h) => (
+                      <li key={h.day + h.name} className="flex items-center gap-3 py-2.5">
+                        <CalendarDays size={15} className="text-blue-600" />
+                        <span className="flex-1 text-slate-700 dark:text-slate-200">{h.name}</span>
+                        <span className="text-xs text-slate-400">{fmtNum(h.day)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Tile>
+            )}
           </div>
 
           {/* per-firm table */}
