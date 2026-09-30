@@ -7,7 +7,7 @@ import { Clock, CheckCircle2, XCircle, ChevronLeft, Loader2, Calendar, Pencil, C
 import Link from 'next/link';
 import { toast, Toaster } from 'sonner';
 
-type AttendanceStatus = 'present' | 'absent' | 'late' | 'half_day' | 'work_from_home' | 'holiday' | 'weekend';
+type AttendanceStatus = 'present' | 'absent' | 'late' | 'half_day' | 'work_from_home' | 'holiday' | 'weekend' | 'paid_leave' | 'unpaid_leave';
 type CorrectionStatus = 'pending' | 'approved' | 'rejected';
 
 interface AttendanceRecord {
@@ -67,6 +67,8 @@ const statusConfig: Record<AttendanceStatus, { label: string; color: string; dot
   work_from_home:{ label: 'WFH',           color: 'text-sky-700 bg-sky-50 border-sky-200',             dot: 'bg-sky-500' },
   holiday:       { label: 'Holiday',       color: 'text-purple-700 bg-purple-50 border-purple-200',    dot: 'bg-purple-500' },
   weekend:       { label: 'Weekend',       color: 'text-slate-500 bg-slate-50 border-slate-200',       dot: 'bg-slate-400' },
+  paid_leave:    { label: 'Paid Leave',    color: 'text-teal-700 bg-teal-50 border-teal-200',          dot: 'bg-teal-500' },
+  unpaid_leave:  { label: 'Unpaid Leave',  color: 'text-orange-700 bg-orange-50 border-orange-200',    dot: 'bg-orange-500' },
 };
 
 const correctionStatusConfig: Record<CorrectionStatus, { label: string; color: string; icon: React.ElementType }> = {
@@ -128,6 +130,13 @@ export default function AttendanceRecords() {
     if (!uid) return;
     setLoading(true);
     try {
+      // Lazy backfill: fills in absent/paid_leave/unpaid_leave for any past
+      // working day with no attendance row yet. Cheap and safe to call on
+      // every page load (see mark_absent_for_date's own guards) — this is
+      // what actually makes "auto-absent" happen without needing a
+      // guaranteed midnight cron on every Supabase plan.
+      supabase.rpc('mark_absent_bulk', { p_days_back: 31 }).then(() => {});
+
       const [year, month] = monthFilter.split('-');
       const startDate = `${year}-${month}-01`;
       const endDate = new Date(parseInt(year), parseInt(month), 0).toISOString().split('T')[0];
@@ -334,6 +343,8 @@ export default function AttendanceRecords() {
 
   // Summary stats
   const presentDays = records.filter(r => r.status === 'present' || r.status === 'work_from_home').length;
+  const paidLeaveDays = records.filter(r => r.status === 'paid_leave').length;
+  const unpaidLeaveDays = records.filter(r => r.status === 'unpaid_leave').length;
   const absentDays = records.filter(r => r.status === 'absent').length;
   const lateDays = records.filter(r => r.status === 'late').length;
   const halfDays = records.filter(r => r.status === 'half_day').length;
@@ -349,7 +360,7 @@ export default function AttendanceRecords() {
   }).filter(Boolean).length;
 
   const avgDailyHours = presentDays > 0 ? totalHours / presentDays : 0;
-  const attendancePct = workingDaysInMonth > 0 ? Math.round((presentDays / workingDaysInMonth) * 100) : 0;
+  const attendancePct = workingDaysInMonth > 0 ? Math.round(((presentDays + paidLeaveDays) / workingDaysInMonth) * 100) : 0;
 
   const submitOvertime = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -488,10 +499,11 @@ export default function AttendanceRecords() {
       </div>
 
       {/* Summary KPIs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 mb-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 mb-5">
         {[
-          { label: 'Present', value: presentDays, color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
+          { label: 'Present', value: paidLeaveDays > 0 ? `${presentDays} + ${paidLeaveDays}` : presentDays, sublabel: paidLeaveDays > 0 ? '(paid leave)' : undefined, color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
           { label: 'Absent', value: absentDays, color: 'text-red-700', bg: 'bg-red-50 border-red-200' },
+          { label: 'Unpaid Leave', value: unpaidLeaveDays, color: 'text-orange-700', bg: 'bg-orange-50 border-orange-200' },
           { label: 'Late', value: lateDays, color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
           { label: 'Half Days', value: halfDays, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
           { label: 'Total Hours', value: `${totalHours.toFixed(1)}h`, color: 'text-indigo-700', bg: 'bg-indigo-50 border-indigo-200' },
@@ -500,7 +512,7 @@ export default function AttendanceRecords() {
         ].map((kpi) => (
           <div key={kpi.label} className={`rounded-xl border p-3 ${kpi.bg}`}>
             <p className={`text-xl font-700 tabular-nums ${kpi.color}`}>{kpi.value}</p>
-            <p className="text-[11px] text-slate-500 mt-0.5">{kpi.label}</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">{kpi.label} {kpi.sublabel && <span className="text-slate-400">{kpi.sublabel}</span>}</p>
           </div>
         ))}
       </div>

@@ -94,6 +94,7 @@ interface Firm {
   firm_type: 'holding' | 'parent' | 'subsidiary' | 'branch';
   parent_firm_id: string | null;
   is_active: boolean;
+  settings?: { weekly_off_days?: number[] } | null;
 }
 
 interface FirmSharing {
@@ -129,7 +130,7 @@ export default function FirmConfiguration() {
   const [firms, setFirms] = useState<Firm[]>([]);
   const [salarySchedule, setSalarySchedule] = useState({ day_of_month: 1, label: 'Salary Day' });
   const [sharingRules, setSharingRules] = useState<FirmSharing[]>([]);
-  const [newFirm, setNewFirm] = useState({ name: '', code: '', firm_type: 'subsidiary' as Firm['firm_type'], parent_firm_id: '' });
+  const [newFirm, setNewFirm] = useState({ name: '', code: '', firm_type: 'subsidiary' as Firm['firm_type'], parent_firm_id: '', weekly_off_days: [0] as number[] });
   const [editingFirmId, setEditingFirmId] = useState<string | null>(null);
   const [newSharing, setNewSharing] = useState({ source_firm_id: '', target_firm_id: '', module: 'tasks' });
   const [firmsLoading, setFirmsLoading] = useState(false);
@@ -151,12 +152,21 @@ export default function FirmConfiguration() {
 
   const startEditFirm = (f: Firm) => {
     setEditingFirmId(f.id);
-    setNewFirm({ name: f.name, code: f.code, firm_type: f.firm_type, parent_firm_id: f.parent_firm_id || '' });
+    setNewFirm({ name: f.name, code: f.code, firm_type: f.firm_type, parent_firm_id: f.parent_firm_id || '', weekly_off_days: f.settings?.weekly_off_days || [0] });
   };
 
   const cancelEditFirm = () => {
     setEditingFirmId(null);
-    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '' });
+    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '', weekly_off_days: [0] });
+  };
+
+  const toggleWeeklyOffDay = (day: number) => {
+    setNewFirm((f) => ({
+      ...f,
+      weekly_off_days: f.weekly_off_days.includes(day)
+        ? f.weekly_off_days.filter((d) => d !== day)
+        : [...f.weekly_off_days, day].sort(),
+    }));
   };
 
   const createFirm = async () => {
@@ -171,6 +181,7 @@ export default function FirmConfiguration() {
         code: newFirm.code.trim().toUpperCase(),
         firm_type: newFirm.firm_type,
         parent_firm_id: newFirm.parent_firm_id || null,
+        settings: { weekly_off_days: newFirm.weekly_off_days },
       }).eq('id', editingFirmId);
       if (error) { toast.error(error.message || 'Failed to update firm — code may already be in use'); return; }
       toast.success('Firm updated');
@@ -184,10 +195,11 @@ export default function FirmConfiguration() {
       code: newFirm.code.trim().toUpperCase(),
       firm_type: newFirm.firm_type,
       parent_firm_id: newFirm.parent_firm_id || null,
+      settings: { weekly_off_days: newFirm.weekly_off_days },
     });
     if (error) { toast.error(error.message || 'Failed to create firm — code may already be in use'); return; }
     toast.success('Firm added');
-    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '' });
+    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '', weekly_off_days: [0] });
     fetchFirms();
   };
 
@@ -787,6 +799,21 @@ export default function FirmConfiguration() {
                                 <option value="">No parent firm</option>
                                 {firms.filter((f) => f.id !== editingFirmId).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
                               </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Weekly off day(s) — used for attendance and payroll</label>
+                              <div className="flex flex-wrap gap-1.5">
+                                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((label, day) => (
+                                  <button key={day} type="button" onClick={() => toggleWeeklyOffDay(day)}
+                                    className={`text-xs font-600 px-3 py-1.5 rounded-lg border transition-colors ${
+                                      newFirm.weekly_off_days.includes(day)
+                                        ? 'bg-violet-600 border-violet-600 text-white'
+                                        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                                    }`}>
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
                             </div>
                             <div className="flex items-center gap-2">
                               <button onClick={createFirm} className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">
