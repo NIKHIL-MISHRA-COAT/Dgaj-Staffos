@@ -3,34 +3,22 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
-import { Bell, CheckCircle2, XCircle, CalendarDays, CheckSquare, Users, Check, X, BellRing } from 'lucide-react';
+import { Bell, Check } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { getNotificationVisual, notificationRoute } from '@/lib/notificationConfig';
 
 
-
-type NotificationType = 'leave_applied' | 'leave_approved' | 'leave_rejected' | 'leave_cancelled' | 'task_assigned' | 'task_updated' | 'user_approved' | 'general' | 'approval_reminder' | 'approval_pending';
 
 interface Notification {
   id: string;
-  type: NotificationType;
+  type: string;
   title: string;
   message: string;
   is_read: boolean;
   created_at: string;
+  related_type?: string | null;
 }
-
-const typeConfig: Record<NotificationType, { icon: React.ElementType; color: string; bg: string }> = {
-  leave_applied:      { icon: CalendarDays, color: 'text-blue-600',    bg: 'bg-blue-50'    },
-  leave_approved:     { icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50' },
-  leave_rejected:     { icon: XCircle,      color: 'text-red-500',     bg: 'bg-red-50'     },
-  leave_cancelled:    { icon: X,            color: 'text-slate-500',   bg: 'bg-slate-100'  },
-  task_assigned:      { icon: CheckSquare,  color: 'text-purple-600',  bg: 'bg-purple-50'  },
-  task_updated:       { icon: CheckSquare,  color: 'text-amber-600',   bg: 'bg-amber-50'   },
-  user_approved:      { icon: Users,        color: 'text-indigo-600',  bg: 'bg-indigo-50'  },
-  general:            { icon: Bell,         color: 'text-slate-500',   bg: 'bg-slate-100'  },
-  approval_reminder:  { icon: BellRing,     color: 'text-amber-600',   bg: 'bg-amber-50'   },
-  approval_pending:   { icon: BellRing,     color: 'text-orange-600',  bg: 'bg-orange-50'  },
-};
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -45,6 +33,7 @@ function timeAgo(dateStr: string): string {
 export default function NotificationBell() {
   const { user, pinSession, effectiveUserId } = useAuth();
   const supabase = createClient();
+  const router = useRouter();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -53,7 +42,7 @@ export default function NotificationBell() {
     if (!effectiveUserId) return;
     const { data } = await supabase
       .from('notifications')
-      .select('id, type, title, message, is_read, created_at')
+      .select('id, type, title, message, is_read, created_at, related_type')
       .eq('user_id', effectiveUserId)
       .order('created_at', { ascending: false })
       .limit(20);
@@ -142,12 +131,12 @@ export default function NotificationBell() {
               </div>
             ) : (
               notifications.map((n) => {
-                const cfg = typeConfig[n.type] || typeConfig.general;
+                const cfg = getNotificationVisual(n.type);
                 const NIcon = cfg.icon;
                 return (
                   <div
                     key={n.id}
-                    onClick={() => !n.is_read && markRead(n.id)}
+                    onClick={() => { if (!n.is_read) markRead(n.id); setOpen(false); router.push(notificationRoute(n.related_type)); }}
                     className={`flex items-start gap-3 px-4 py-3 cursor-pointer transition-colors ${!n.is_read ? 'bg-blue-50/50 dark:bg-blue-900/20 hover:bg-blue-50 dark:hover:bg-blue-900/30' : 'hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
                   >
                     <div className={`w-8 h-8 rounded-xl ${cfg.bg} flex items-center justify-center flex-shrink-0 mt-0.5`}>

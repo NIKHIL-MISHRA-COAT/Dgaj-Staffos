@@ -8,6 +8,7 @@ import { Menu } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDeviceSession } from '@/lib/useDeviceSession';
 import RouteGuard from './RouteGuard';
+import NotificationListener from './NotificationListener';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -36,6 +37,7 @@ export default function AppLayout({ children, activePath }: AppLayoutProps) {
 
   return (
     <div className="flex bg-slate-50 dark:bg-slate-950 overflow-hidden" style={{ height: '100dvh' }}>
+      <NotificationListener />
       {/* Desktop sidebar — part of normal flow, never shown on mobile */}
       <div className="hidden lg:flex lg:flex-shrink-0">
         <Sidebar activePath={activePath} />

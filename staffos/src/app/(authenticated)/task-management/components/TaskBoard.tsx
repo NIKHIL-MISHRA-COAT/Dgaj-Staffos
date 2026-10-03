@@ -132,6 +132,7 @@ interface NewTaskForm {
     clientOrgId: string;
   taskCategory: string;
   helperUserIds: string[];
+  collaboratorUserIds: string[];
   isFlagged: boolean;
   flagReason: string;
 }
@@ -140,7 +141,7 @@ const defaultForm: NewTaskForm = {
   title: '', description: '', priority: 'medium', dueDate: '', dueTime: '',
   assignedToDept: '', assignedUserIds: [], recurring: '', notifyBefore: 30, reminderTimes: [],
     checklistItems: [''], organisationRelatesTo: '', clientOrgId: '', taskCategory: 'general',
-  helperUserIds: [], isFlagged: false, flagReason: '',
+  helperUserIds: [], collaboratorUserIds: [], isFlagged: false, flagReason: '',
 };
 
 // Extended recurring options
@@ -762,6 +763,7 @@ export default function TaskBoard() {
         assigned_to_dept: primaryUser?.department || newTask.assignedToDept || 'General',
         assigned_user_ids: newTask.assignedUserIds,
         assigned_by: uid,
+        created_by: uid,
         assigned_by_name: userName,
         assigned_by_dept: userDept,
         checklist: newTask.checklistItems.filter((i) => i.trim()).map((text, idx) => ({
@@ -779,6 +781,23 @@ export default function TaskBoard() {
 
             const { data: insertedTask, error } = await supabase.from('tasks').insert(taskData).select().single();
       if (error) throw error;
+
+      // Send pending collaboration requests, same as the "afterward" flow —
+      // they still need to accept, same as if invited after creation.
+      if (insertedTask && newTask.collaboratorUserIds.length > 0) {
+        const collabInserts = newTask.collaboratorUserIds.map((userId) => ({
+          task_id: insertedTask.id,
+          user_id: userId,
+          invited_by: uid,
+          invited_by_name: userName,
+          role: 'collaborator',
+          status: 'pending',
+        }));
+        const { error: collabErr } = await supabase.from('task_collaborators').insert(collabInserts);
+        if (collabErr) {
+          toast.error('Task created, but failed to send collaboration requests: ' + collabErr.message);
+        }
+      }
 
       // Real-time subscription will add the task to state
       if (insertedTask) setTasks((prev) => [{ ...insertedTask, assigned_user_ids: insertedTask.assigned_user_ids || [], checklist: insertedTask.checklist || [], tags: insertedTask.tags || [] }, ...prev]);
@@ -2488,6 +2507,18 @@ export default function TaskBoard() {
                   allUsers={allUsers}
                   selectedIds={newTask.assignedUserIds}
                   onChange={(ids) => setNewTask({ ...newTask, assignedUserIds: ids })}
+                  roleGroups={roleGroups}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">
+                  <UserPlus size={12} className="inline mr-1" />Invite Collaborators <span className="text-slate-400 font-400">(optional — they'll need to accept)</span>
+                </label>
+                <UserMultiSelect
+                  allUsers={allUsers.filter(u => !newTask.assignedUserIds.includes(u.id))}
+                  selectedIds={newTask.collaboratorUserIds}
+                  onChange={(ids) => setNewTask({ ...newTask, collaboratorUserIds: ids })}
                   roleGroups={roleGroups}
                 />
               </div>

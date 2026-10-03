@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Wallet, Plus, Download, Search, X, Loader2, Edit2, Eye } from 'lucide-react';
+import { Wallet, Plus, Download, Search, X, Loader2, Edit2, Eye, Lock, RefreshCw } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
@@ -30,6 +30,13 @@ interface PayrollRecord {
   overtime_hours: number;
   overtime_pay: number;
   bonus: number;
+  working_days?: number | null;
+  per_day_salary?: number | null;
+  amount_payable?: number | null;
+  deduction_per_absent_day?: number | null;
+  total_deducted?: number | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
   advance_deduction: number;
   leave_deduction: number;
   status: string;
@@ -114,12 +121,16 @@ export default function PayrollPage() {
     user_id: '',
     pay_period_start: '',
     pay_period_end: '',
-    bonus: '0',
-    advance_deduction: '0',
-    other_deductions: '0',
+    total_salary: '',
+    working_days: '',
+    days_present: '',
+    days_absent: '',
+    deduction_per_absent_day: '1000',
     notes: '',
     payment_method: 'bank_transfer',
   });
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
+  const [autoFilling, setAutoFilling] = useState(false);
 
   const [salaryForm, setSalaryForm] = useState({
     basic_salary: '',
@@ -199,132 +210,175 @@ export default function PayrollPage() {
     return salaryStructures.find(s => s.user_id === userId) || null;
   };
 
-  const calculatePayroll = (structure: SalaryStructure, daysWorked: number, totalWorkDays: number, bonus: number, advanceDeduction: number, otherDeductions: number) => {
-    const dailyRate = structure.basic_salary / totalWorkDays;
-    const effectiveBasic = dailyRate * daysWorked;
-    const hra = effectiveBasic * (structure.hra_percent / 100);
-    const transport = structure.transport_allowance;
-    const otherAllowances = structure.other_allowances;
-    const gross = effectiveBasic + hra + transport + otherAllowances + bonus;
-    const pf = effectiveBasic * (structure.pf_percent / 100);
-    const esi = gross * (structure.esi_percent / 100);
-    const tds = gross * (structure.tds_percent / 100);
-    const totalDed = pf + esi + tds + advanceDeduction + otherDeductions;
-    const net = gross - totalDed;
-    return { effectiveBasic, hra, transport, otherAllowances, gross, pf, esi, tds, totalDed, net };
+  // total salary for an employee = their full monthly structure (basic + HRA + transport + other allowances)
+  const getTotalMonthlySalary = (structure: SalaryStructure) =>
+    structure.basic_salary + structure.basic_salary * (structure.hra_percent / 100) + structure.transport_allowance + structure.other_allowances;
+
+  // Per-day salary = total salary / working days (holidays & weekly-off already excluded
+  // by attendance_summary_for_period when working_days was fetched). Live-recalculated
+  // any time an input changes — this is a pure function of the current form state.
+  const computeSimplePayroll = (totalSalary: number, workingDays: number, daysPresent: number, daysAbsent: number, deductionPerAbsentDay: number) => {
+    const perDaySalary = workingDays > 0 ? totalSalary / workingDays : 0;
+    const amountPayable = perDaySalary * daysPresent;
+    const totalDeducted = daysAbsent * deductionPerAbsentDay;
+    const totalToPay = amountPayable - totalDeducted;
+    return { perDaySalary, amountPayable, totalDeducted, totalToPay };
+  };
+
+  // Live preview for whatever is currently in the form (create or edit) —
+  // recomputes on every render from current form state, so editing any field
+  // instantly updates the totals shown to the manager.
+  const livePreview = computeSimplePayroll(
+    parseFloat(processForm.total_salary) || 0,
+    parseFloat(processForm.working_days) || 0,
+    parseFloat(processForm.days_present) || 0,
+    parseFloat(processForm.days_absent) || 0,
+    parseFloat(processForm.deduction_per_absent_day) || 0
+  );
+
+  // Auto-fill working days / days present / days absent from actual attendance
+  // for the selected employee + period, plus their total salary from their
+  // salary structure. Only runs when creating a new payslip — editing an
+  // existing one keeps whatever was saved (and lets the manager override it).
+  const autoFillFromAttendance = async (userId: string, start: string, end: string) => {
+    if (!userId || !start || !end) return;
+    setAutoFilling(true);
+    try {
+      const structure = getSalaryStructure(userId);
+      const { data } = await supabase.rpc('attendance_summary_for_period', {
+        p_user_id: userId, p_start: start, p_end: end,
+      });
+      const summary = Array.isArray(data) ? data[0] : data;
+      setProcessForm(p => ({
+        ...p,
+        total_salary: structure ? String(getTotalMonthlySalary(structure)) : p.total_salary,
+        working_days: summary ? String(summary.working_days) : p.working_days,
+        days_present: summary ? String(summary.days_present) : p.days_present,
+        days_absent: summary ? String(summary.days_absent) : p.days_absent,
+      }));
+    } catch {
+      // Non-fatal — manager can still fill these in by hand.
+    } finally {
+      setAutoFilling(false);
+    }
+  };
+
+  useEffect(() => {
+    if (editingRecordId) return; // don't clobber a record being edited
+    if (processForm.user_id && processForm.pay_period_start && processForm.pay_period_end) {
+      autoFillFromAttendance(processForm.user_id, processForm.pay_period_start, processForm.pay_period_end);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processForm.user_id, processForm.pay_period_start, processForm.pay_period_end, editingRecordId]);
+
+  const openEditRecord = (record: PayrollRecord) => {
+    setEditingRecordId(record.id);
+    setProcessForm({
+      user_id: record.user_id,
+      pay_period_start: record.pay_period_start,
+      pay_period_end: record.pay_period_end,
+      total_salary: String((record.working_days || 0) * (record.per_day_salary || 0) || record.gross_salary || 0),
+      working_days: String(record.working_days ?? ''),
+      days_present: String(record.days_worked ?? ''),
+      days_absent: String(record.days_absent ?? ''),
+      deduction_per_absent_day: String(record.deduction_per_absent_day ?? 1000),
+      notes: record.notes || '',
+      payment_method: record.payment_method || 'bank_transfer',
+    });
+    setSelectedRecord(null);
+    setShowProcessModal(true);
+  };
+
+  // Manager cannot edit/approve once a payslip is approved; director always can.
+  const isLockedForUser = (record: PayrollRecord) => !!record.approved_at && userRole !== 'director';
+
+  const openNewPayrollForm = () => {
+    setEditingRecordId(null);
+    setProcessForm({
+      user_id: '', pay_period_start: '', pay_period_end: '', total_salary: '',
+      working_days: '', days_present: '', days_absent: '', deduction_per_absent_day: '1000',
+      notes: '', payment_method: 'bank_transfer',
+    });
+    setShowProcessModal(true);
   };
 
   const handleProcessPayroll = async () => {
     if (!processForm.user_id || !processForm.pay_period_start || !processForm.pay_period_end) {
       toast.error('Please fill all required fields'); return;
     }
-    const structure = getSalaryStructure(processForm.user_id);
-    if (!structure) { toast.error('No salary structure found for this employee. Please set it up first.'); return; }
+    const totalSalary = parseFloat(processForm.total_salary) || 0;
+    const workingDays = parseFloat(processForm.working_days) || 0;
+    const daysPresent = parseFloat(processForm.days_present) || 0;
+    const daysAbsent = parseFloat(processForm.days_absent) || 0;
+    const deductionPerDay = parseFloat(processForm.deduction_per_absent_day) || 0;
+
+    if (totalSalary <= 0) { toast.error('Total salary must be greater than 0'); return; }
+    if (workingDays <= 0) { toast.error('Working days must be greater than 0'); return; }
 
     setProcessing(true);
     try {
-      // Get attendance for the period
-      const { data: attData } = await supabase
-        .from('attendance_records')
-        .select('status, total_hours')
-        .eq('user_id', processForm.user_id)
-        .gte('work_date', processForm.pay_period_start)
-        .lte('work_date', processForm.pay_period_end);
+      const calc = computeSimplePayroll(totalSalary, workingDays, daysPresent, daysAbsent, deductionPerDay);
 
-      const daysWorked = (attData || []).filter(a => a.status === 'present' || a.status === 'half_day').length;
-      const daysAbsent = (attData || []).filter(a => a.status === 'absent').length;
-      const overtimeHours = (attData || []).reduce((sum, a) => sum + (a.total_hours > 8 ? a.total_hours - 8 : 0), 0);
-
-      // Calculate working days in period
-      const start = new Date(processForm.pay_period_start);
-      const end = new Date(processForm.pay_period_end);
-      let totalWorkDays = 0;
-      const cur = new Date(start);
-      while (cur <= end) {
-        const day = cur.getDay();
-        if (day !== 0 && day !== 6) totalWorkDays++;
-        cur.setDate(cur.getDate() + 1);
-      }
-
-      const bonus = parseFloat(processForm.bonus) || 0;
-      const advanceDed = parseFloat(processForm.advance_deduction) || 0;
-      const otherDed = parseFloat(processForm.other_deductions) || 0;
-      const overtimePay = overtimeHours * (structure.basic_salary / (totalWorkDays * 8)) * 1.5;
-
-      const calc = calculatePayroll(structure, daysWorked || totalWorkDays, totalWorkDays, bonus + overtimePay, advanceDed, otherDed);
-
-      const { error } = await supabase.from('payroll_records').insert({
+      const payload = {
         user_id: processForm.user_id,
         firm_id: users.find(u => u.id === processForm.user_id)?.firm_id || null,
         pay_period_start: processForm.pay_period_start,
         pay_period_end: processForm.pay_period_end,
-        basic_salary: calc.effectiveBasic,
-        hra: calc.hra,
-        transport_allowance: calc.transport,
-        other_allowances: calc.otherAllowances,
-        gross_salary: calc.gross,
-        pf_deduction: calc.pf,
-        esi_deduction: calc.esi,
-        tds_deduction: calc.tds,
-        other_deductions: otherDed,
-        total_deductions: calc.totalDed,
-        net_salary: calc.net,
-        days_worked: daysWorked,
+        gross_salary: totalSalary,
+        working_days: workingDays,
+        per_day_salary: calc.perDaySalary,
+        days_worked: daysPresent,
+        amount_payable: calc.amountPayable,
         days_absent: daysAbsent,
-        overtime_hours: overtimeHours,
-        overtime_pay: overtimePay,
-        bonus,
-        advance_deduction: advanceDed,
-        status: 'processed',
+        deduction_per_absent_day: deductionPerDay,
+        total_deducted: calc.totalDeducted,
+        total_deductions: calc.totalDeducted,
+        net_salary: calc.totalToPay,
         payment_method: processForm.payment_method,
         notes: processForm.notes,
-        processed_by: effectiveUserId,
-        processed_at: new Date().toISOString(),
-      });
-      if (error) throw error;
-      toast.success('Payroll processed successfully');
+      };
+
+      if (editingRecordId) {
+        const { error } = await supabase.from('payroll_records').update(payload).eq('id', editingRecordId);
+        if (error) throw error;
+        toast.success('Payslip updated');
+      } else {
+        const { error } = await supabase.from('payroll_records').insert({
+          ...payload,
+          status: 'processed',
+          processed_by: effectiveUserId,
+          processed_at: new Date().toISOString(),
+        });
+        if (error) throw error;
+        toast.success('Payroll processed successfully');
+      }
+
       setShowProcessModal(false);
+      setEditingRecordId(null);
       init();
     } catch (err: any) {
-      toast.error(err.message || 'Failed to process payroll');
+      toast.error(err.message || 'Failed to save payslip');
     } finally {
       setProcessing(false);
     }
   };
 
-  const handleSaveSalaryStructure = async () => {
-    if (!showSalaryModal || !parseFloat(salaryForm.basic_salary)) {
-      toast.error('Basic salary is required'); return;
+  const handleApprove = async (record: PayrollRecord) => {
+    if (isLockedForUser(record)) {
+      toast.error('This payslip is already approved and locked. Only a director can make further changes.');
+      return;
     }
     try {
-      const { error } = await supabase.from('salary_structures').upsert({
-        user_id: showSalaryModal.id,
-        firm_id: showSalaryModal.firm_id || null,
-        basic_salary: parseFloat(salaryForm.basic_salary),
-        hra_percent: parseFloat(salaryForm.hra_percent),
-        transport_allowance: parseFloat(salaryForm.transport_allowance),
-        other_allowances: parseFloat(salaryForm.other_allowances),
-        pf_percent: parseFloat(salaryForm.pf_percent),
-        esi_percent: parseFloat(salaryForm.esi_percent),
-        tds_percent: parseFloat(salaryForm.tds_percent),
-        created_by: effectiveUserId,
-      }, { onConflict: 'user_id' });
-      if (error) throw error;
-      toast.success('Salary structure saved');
-      setShowSalaryModal(null);
-      init();
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to save salary structure');
-    }
-  };
-
-  const handleMarkPaid = async (id: string) => {
-    try {
-      await supabase.from('payroll_records').update({ status: 'paid', payment_date: new Date().toISOString().split('T')[0] }).eq('id', id);
-      toast.success('Marked as paid');
+      await supabase.from('payroll_records').update({
+        status: 'paid',
+        payment_date: new Date().toISOString().split('T')[0],
+        approved_by: effectiveUserId,
+        approved_at: new Date().toISOString(),
+      }).eq('id', record.id);
+      toast.success('Payslip approved');
       setSelectedRecord(null);
       init();
-    } catch { toast.error('Failed to update'); }
+    } catch { toast.error('Failed to approve'); }
   };
 
   const exportPayroll = () => {
@@ -383,7 +437,7 @@ export default function PayrollPage() {
                   className="flex items-center gap-2 px-3 py-2 border border-slate-200 dark:border-slate-600 rounded-xl text-sm font-600 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
                   <Download size={14} /> Export
                 </button>
-                <button onClick={() => setShowProcessModal(true)}
+                <button onClick={openNewPayrollForm}
                   className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-600 px-4 py-2.5 rounded-xl transition-colors">
                   <Plus size={15} /> Process Payroll
                 </button>
@@ -459,7 +513,7 @@ export default function PayrollPage() {
                   <Wallet size={40} className="mb-3 opacity-30" />
                   <p className="text-sm font-500">No payroll records found</p>
                   {isDirectorOrManager && (
-                    <button onClick={() => setShowProcessModal(true)} className="mt-3 text-sm text-emerald-600 font-600 hover:underline">
+                    <button onClick={openNewPayrollForm} className="mt-3 text-sm text-emerald-600 font-600 hover:underline">
                       Process first payroll
                     </button>
                   )}
@@ -607,59 +661,72 @@ export default function PayrollPage() {
                 </span>
               </div>
               <p className="text-sm text-slate-600 dark:text-slate-400 mb-4 font-500">
-                Pay Period: {getMonthYear(selectedRecord.pay_period_start)} ({selectedRecord.days_worked} days worked)
+                Pay Period: {getMonthYear(selectedRecord.pay_period_start)}
               </p>
+              {isLockedForUser(selectedRecord) && (
+                <div className="mb-3 flex items-center gap-2 bg-slate-100 dark:bg-slate-700/50 rounded-xl px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
+                  <Lock size={12} /> Approved and locked — only a director can make further changes.
+                </div>
+              )}
               <div className="space-y-2 text-sm">
-                <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-xl p-3 mb-2">
-                  <p className="text-xs font-700 text-emerald-700 dark:text-emerald-400 mb-2">EARNINGS</p>
-                  {[
-                    ['Basic Salary', selectedRecord.basic_salary],
-                    ['HRA', selectedRecord.hra],
-                    ['Transport Allowance', selectedRecord.transport_allowance],
-                    ['Other Allowances', selectedRecord.other_allowances],
-                    ['Overtime Pay', selectedRecord.overtime_pay],
-                    ['Bonus', selectedRecord.bonus],
-                  ].filter(([, v]) => (v as number) > 0).map(([label, value]) => (
-                    <div key={label as string} className="flex justify-between py-0.5">
-                      <span className="text-slate-600 dark:text-slate-400">{label}</span>
-                      <span className="font-600 text-slate-800 dark:text-slate-200">{formatCurrency(value as number)}</span>
-                    </div>
-                  ))}
-                  <div className="flex justify-between py-1 border-t border-emerald-200 dark:border-emerald-800 mt-1 font-700">
-                    <span className="text-emerald-700 dark:text-emerald-400">Gross Salary</span>
-                    <span className="text-emerald-700 dark:text-emerald-400">{formatCurrency(selectedRecord.gross_salary)}</span>
+                {/* Row 1: working days, total salary, per-day salary */}
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="bg-slate-50 dark:bg-slate-700/40 rounded-xl p-3 text-center">
+                    <p className="text-lg font-700 text-slate-800 dark:text-slate-100">{selectedRecord.working_days ?? '—'}</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Working Days</p>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-slate-700/40 rounded-xl p-3 text-center">
+                    <p className="text-lg font-700 text-slate-800 dark:text-slate-100">{formatCurrency(selectedRecord.gross_salary)}</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Total Salary</p>
+                  </div>
+                  <div className="bg-slate-50 dark:bg-slate-700/40 rounded-xl p-3 text-center">
+                    <p className="text-lg font-700 text-slate-800 dark:text-slate-100">{formatCurrency(selectedRecord.per_day_salary || 0)}</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Per-Day Salary</p>
                   </div>
                 </div>
-                <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-3 mb-2">
-                  <p className="text-xs font-700 text-red-700 dark:text-red-400 mb-2">DEDUCTIONS</p>
-                  {[
-                    ['PF', selectedRecord.pf_deduction],
-                    ['ESI', selectedRecord.esi_deduction],
-                    ['TDS', selectedRecord.tds_deduction],
-                    ['Advance', selectedRecord.advance_deduction],
-                    ['Other', selectedRecord.other_deductions],
-                  ].filter(([, v]) => (v as number) > 0).map(([label, value]) => (
-                    <div key={label as string} className="flex justify-between py-0.5">
-                      <span className="text-slate-600 dark:text-slate-400">{label}</span>
-                      <span className="font-600 text-red-600 dark:text-red-400">-{formatCurrency(value as number)}</span>
-                    </div>
-                  ))}
-                  <div className="flex justify-between py-1 border-t border-red-200 dark:border-red-800 mt-1 font-700">
-                    <span className="text-red-700 dark:text-red-400">Total Deductions</span>
-                    <span className="text-red-700 dark:text-red-400">-{formatCurrency(selectedRecord.total_deductions)}</span>
+                {/* Row 2: days present, amount payable */}
+                <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-xl p-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs text-emerald-600 dark:text-emerald-400">Days Present (present + paid leave)</p>
+                    <p className="text-lg font-700 text-emerald-700 dark:text-emerald-400">{selectedRecord.days_worked}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-emerald-600 dark:text-emerald-400">Amount Payable</p>
+                    <p className="text-lg font-700 text-emerald-700 dark:text-emerald-400">{formatCurrency(selectedRecord.amount_payable || 0)}</p>
+                  </div>
+                </div>
+                {/* Row 3: absent days, deduction/day, total deducted */}
+                <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-3 grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <p className="text-lg font-700 text-red-700 dark:text-red-400">{selectedRecord.days_absent}</p>
+                    <p className="text-[11px] text-red-600 dark:text-red-400">Absent Days</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-700 text-red-700 dark:text-red-400">{formatCurrency(selectedRecord.deduction_per_absent_day || 0)}</p>
+                    <p className="text-[11px] text-red-600 dark:text-red-400">Per Absent Day</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-700 text-red-700 dark:text-red-400">{formatCurrency(selectedRecord.total_deducted || 0)}</p>
+                    <p className="text-[11px] text-red-600 dark:text-red-400">Total Deducted</p>
                   </div>
                 </div>
                 <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-3 flex justify-between items-center">
-                  <span className="font-700 text-blue-800 dark:text-blue-300">NET SALARY</span>
+                  <span className="font-700 text-blue-800 dark:text-blue-300">TOTAL TO BE PAID</span>
                   <span className="text-xl font-700 text-blue-800 dark:text-blue-300">{formatCurrency(selectedRecord.net_salary)}</span>
                 </div>
               </div>
             </div>
             <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700">
-              {isDirectorOrManager && selectedRecord.status === 'processed' && (
-                <button onClick={() => handleMarkPaid(selectedRecord.id)}
+              {isDirectorOrManager && !isLockedForUser(selectedRecord) && (
+                <button onClick={() => openEditRecord(selectedRecord)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 text-sm font-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+                  Edit
+                </button>
+              )}
+              {isDirectorOrManager && selectedRecord.status !== 'paid' && !isLockedForUser(selectedRecord) && (
+                <button onClick={() => handleApprove(selectedRecord)}
                   className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-600 transition-colors">
-                  Mark as Paid
+                  Approve
                 </button>
               )}
               <button onClick={() => setSelectedRecord(null)}
@@ -676,57 +743,108 @@ export default function PayrollPage() {
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
-              <h3 className="text-base font-700 text-slate-900 dark:text-slate-100">Process Payroll</h3>
-              <button onClick={() => setShowProcessModal(false)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+              <h3 className="text-base font-700 text-slate-900 dark:text-slate-100">{editingRecordId ? 'Edit Payslip' : 'Process Payroll'}</h3>
+              <button onClick={() => { setShowProcessModal(false); setEditingRecordId(null); }} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
                 <X size={18} className="text-slate-500" />
               </button>
             </div>
             <div className="px-6 py-5 space-y-4">
               <div>
                 <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Employee *</label>
-                <select value={processForm.user_id} onChange={e => setProcessForm(p => ({ ...p, user_id: e.target.value }))}
-                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300">
+                <select value={processForm.user_id} disabled={!!editingRecordId} onChange={e => setProcessForm(p => ({ ...p, user_id: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300 disabled:opacity-60">
                   <option value="">Select employee…</option>
                   {users.map(u => <option key={u.id} value={u.id}>{u.full_name} — {u.department}</option>)}
                 </select>
-                {processForm.user_id && !getSalaryStructure(processForm.user_id) && (
-                  <p className="text-xs text-amber-600 mt-1">⚠️ No salary structure found. Please set it up in Salary Structures tab first.</p>
+                {processForm.user_id && !getSalaryStructure(processForm.user_id) && !editingRecordId && (
+                  <p className="text-xs text-amber-600 mt-1">⚠️ No salary structure found — you can still fill in total salary manually below.</p>
                 )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Period Start *</label>
-                  <input type="date" value={processForm.pay_period_start}
+                  <input type="date" value={processForm.pay_period_start} disabled={!!editingRecordId}
                     onChange={e => setProcessForm(p => ({ ...p, pay_period_start: e.target.value }))}
-                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300 disabled:opacity-60" />
                 </div>
                 <div>
                   <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Period End *</label>
-                  <input type="date" value={processForm.pay_period_end}
+                  <input type="date" value={processForm.pay_period_end} disabled={!!editingRecordId}
                     onChange={e => setProcessForm(p => ({ ...p, pay_period_end: e.target.value }))}
-                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300 disabled:opacity-60" />
                 </div>
               </div>
+
+              {autoFilling && (
+                <p className="text-xs text-slate-400 flex items-center gap-1.5"><RefreshCw size={11} className="animate-spin" /> Auto-filling from attendance…</p>
+              )}
+
+              {/* Row 1: working days, total salary, per-day salary (per-day is derived, read-only) */}
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Bonus (₹)</label>
-                  <input type="number" min="0" value={processForm.bonus}
-                    onChange={e => setProcessForm(p => ({ ...p, bonus: e.target.value }))}
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Working Days *</label>
+                  <input type="number" min="0" value={processForm.working_days}
+                    onChange={e => setProcessForm(p => ({ ...p, working_days: e.target.value }))}
                     className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
                 </div>
                 <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Advance Ded. (₹)</label>
-                  <input type="number" min="0" value={processForm.advance_deduction}
-                    onChange={e => setProcessForm(p => ({ ...p, advance_deduction: e.target.value }))}
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Total Salary (₹) *</label>
+                  <input type="number" min="0" value={processForm.total_salary}
+                    onChange={e => setProcessForm(p => ({ ...p, total_salary: e.target.value }))}
                     className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
                 </div>
                 <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Other Ded. (₹)</label>
-                  <input type="number" min="0" value={processForm.other_deductions}
-                    onChange={e => setProcessForm(p => ({ ...p, other_deductions: e.target.value }))}
-                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Per-Day Salary</label>
+                  <div className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
+                    {formatCurrency(livePreview.perDaySalary)}
+                  </div>
                 </div>
               </div>
+
+              {/* Row 2: days present, amount payable (derived) */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Days Present (present + paid leave) *</label>
+                  <input type="number" min="0" value={processForm.days_present}
+                    onChange={e => setProcessForm(p => ({ ...p, days_present: e.target.value }))}
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                </div>
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Amount Payable</label>
+                  <div className="w-full border border-emerald-200 dark:border-emerald-800 rounded-xl px-3 py-2.5 text-sm bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 font-600">
+                    {formatCurrency(livePreview.amountPayable)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 3: absent days, deduction/day, total deducted (derived) */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Absent Days *</label>
+                  <input type="number" min="0" value={processForm.days_absent}
+                    onChange={e => setProcessForm(p => ({ ...p, days_absent: e.target.value }))}
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                </div>
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Deduction/Absent Day (₹)</label>
+                  <input type="number" min="0" value={processForm.deduction_per_absent_day}
+                    onChange={e => setProcessForm(p => ({ ...p, deduction_per_absent_day: e.target.value }))}
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                </div>
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Total Deducted</label>
+                  <div className="w-full border border-red-200 dark:border-red-800 rounded-xl px-3 py-2.5 text-sm bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 font-600">
+                    {formatCurrency(livePreview.totalDeducted)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live total */}
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-3.5 flex justify-between items-center">
+                <span className="font-700 text-blue-800 dark:text-blue-300 text-sm">TOTAL TO BE PAID</span>
+                <span className="text-xl font-700 text-blue-800 dark:text-blue-300">{formatCurrency(livePreview.totalToPay)}</span>
+              </div>
+
               <div>
                 <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Payment Method</label>
                 <select value={processForm.payment_method} onChange={e => setProcessForm(p => ({ ...p, payment_method: e.target.value }))}
@@ -744,14 +862,14 @@ export default function PayrollPage() {
               </div>
             </div>
             <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700">
-              <button onClick={() => setShowProcessModal(false)}
+              <button onClick={() => { setShowProcessModal(false); setEditingRecordId(null); }}
                 className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 text-sm font-600 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
                 Cancel
               </button>
               <button onClick={handleProcessPayroll} disabled={processing}
                 className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-600 transition-colors flex items-center justify-center gap-2">
                 {processing ? <Loader2 size={14} className="animate-spin" /> : null}
-                {processing ? 'Processing…' : 'Process Payroll'}
+                {processing ? (editingRecordId ? 'Saving…' : 'Processing…') : (editingRecordId ? 'Save Changes' : 'Process Payroll')}
               </button>
             </div>
           </div>

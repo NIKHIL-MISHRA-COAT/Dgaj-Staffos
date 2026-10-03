@@ -3,15 +3,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
-import { Bell, CheckCircle2, XCircle, CalendarDays, CheckSquare, Users, Loader2, Check, Trash2, BellOff, Ticket, Receipt, KeyRound, BellRing, Smartphone } from 'lucide-react';
+import { Loader2, Check, Trash2, BellOff, BellRing, Smartphone } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { useLanguage } from '@/contexts/LanguageContext';
-
-type NotificationType = 'leave_applied' | 'leave_approved' | 'leave_rejected' | 'leave_cancelled' | 'task_assigned' | 'task_updated' | 'user_approved' | 'general' | 'ticket_created' | 'ticket_updated' | 'expense_submitted' | 'expense_approved' | 'expense_rejected' | 'pin_set' | 'approval_reminder' | 'approval_pending' | 'attendance' | 'red_flag' | 'broadcast';
+import { useRouter } from 'next/navigation';
+import { getNotificationVisual, notificationRoute } from '@/lib/notificationConfig';
 
 interface Notification {
   id: string;
-  type: NotificationType;
+  type: string;
   title: string;
   message: string;
   is_read: boolean;
@@ -19,28 +19,6 @@ interface Notification {
   related_type: string;
   created_at: string;
 }
-
-const typeConfig: Record<NotificationType, { icon: React.ElementType; color: string; bg: string }> = {
-  leave_applied:      { icon: CalendarDays, color: 'text-blue-600',    bg: 'bg-blue-50'    },
-  leave_approved:     { icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50' },
-  leave_rejected:     { icon: XCircle,      color: 'text-red-500',     bg: 'bg-red-50'     },
-  leave_cancelled:    { icon: XCircle,      color: 'text-slate-500',   bg: 'bg-slate-100'  },
-  task_assigned:      { icon: CheckSquare,  color: 'text-purple-600',  bg: 'bg-purple-50'  },
-  task_updated:       { icon: CheckSquare,  color: 'text-amber-600',   bg: 'bg-amber-50'   },
-  user_approved:      { icon: Users,        color: 'text-indigo-600',  bg: 'bg-indigo-50'  },
-  general:            { icon: Bell,         color: 'text-slate-500',   bg: 'bg-slate-100'  },
-  ticket_created:     { icon: Ticket,       color: 'text-orange-600',  bg: 'bg-orange-50'  },
-  ticket_updated:     { icon: Ticket,       color: 'text-amber-600',   bg: 'bg-amber-50'   },
-  expense_submitted:  { icon: Receipt,      color: 'text-emerald-600', bg: 'bg-emerald-50' },
-  expense_approved:   { icon: Receipt,      color: 'text-emerald-600', bg: 'bg-emerald-50' },
-  expense_rejected:   { icon: Receipt,      color: 'text-red-500',     bg: 'bg-red-50'     },
-  pin_set:            { icon: KeyRound,     color: 'text-amber-600',   bg: 'bg-amber-50'   },
-  approval_reminder:  { icon: BellRing,     color: 'text-amber-600',   bg: 'bg-amber-50'   },
-  approval_pending:   { icon: BellRing,     color: 'text-orange-600',  bg: 'bg-orange-50'  },
-  attendance:         { icon: CheckCircle2, color: 'text-teal-600',    bg: 'bg-teal-50'    },
-  red_flag:           { icon: XCircle,      color: 'text-red-600',     bg: 'bg-red-50'     },
-  broadcast:          { icon: Bell,         color: 'text-blue-600',    bg: 'bg-blue-50'    },
-};
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -56,6 +34,7 @@ function timeAgo(dateStr: string): string {
 
 export default function NotificationsPage() {
   const { user, effectiveUserId } = useAuth();
+  const router = useRouter();
   const supabase = createClient();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
@@ -89,7 +68,7 @@ export default function NotificationsPage() {
     }
   }, []);
 
-  // Real-time subscription + in-app toast + push notification
+  // Real-time subscription — keeps this list live (popups are handled by NotificationListener)
   useEffect(() => {
     const uid = effectiveUserId;
     if (!uid) return;
@@ -103,20 +82,7 @@ export default function NotificationsPage() {
       }, (payload) => {
         const n = payload.new as Notification;
         setNotifications((prev) => [n, ...prev]);
-        // In-app toast popup
-        toast(n.title, { description: n.message, duration: 5000 });
-        // Push notification via service worker
-        if (typeof window !== 'undefined' && 'serviceWorker' in navigator && Notification.permission === 'granted') {
-          navigator.serviceWorker.ready.then((reg) => {
-            reg.showNotification(n.title, {
-              body: n.message,
-              icon: '/assets/images/DGaj_Logo_Black-1776504240302.png',
-              badge: '/assets/images/app_logo.png',
-              tag: n.id,
-              data: { url: '/notifications' },
-            });
-          }).catch(() => {});
-        }
+        // Popups + system notifications are handled globally by NotificationListener.
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
@@ -231,10 +197,10 @@ export default function NotificationsPage() {
         ) : (
           <div className="divide-y divide-slate-100 dark:divide-slate-700">
             {filtered.map((n) => {
-              const cfg = typeConfig[n.type] || typeConfig.general;
+              const cfg = getNotificationVisual(n.type);
               const NIcon = cfg.icon;
               return (
-                <div key={n.id} onClick={() => !n.is_read && markRead(n.id)}
+                <div key={n.id} onClick={() => { if (!n.is_read) markRead(n.id); const target = notificationRoute(n.related_type); if (target !== '/notifications') router.push(target); }}
                   className={`flex items-start gap-3 p-4 transition-colors cursor-pointer group ${!n.is_read ? 'bg-blue-50/40 dark:bg-blue-900/20 hover:bg-blue-50/70 dark:hover:bg-blue-900/30' : 'hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}>
                   <div className={`w-9 h-9 rounded-xl ${cfg.bg} flex items-center justify-center flex-shrink-0 mt-0.5`}>
                     <NIcon size={16} className={cfg.color} />

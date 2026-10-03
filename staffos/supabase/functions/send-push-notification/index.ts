@@ -163,7 +163,39 @@ serve(async (req) => {
     );
 
     const body = await req.json();
-    const { user_id, title, message, url, type } = body;
+
+    // Accepts two shapes:
+    //  1. Direct call:            { user_id, title, message, url, type }
+    //  2. Database Webhook on the notifications table (INSERT):
+    //     { type: 'INSERT', table: 'notifications', record: { user_id, title, message, type, related_type, ... } }
+    // Note: in a webhook body, `body.type` is the DB operation ('INSERT'),
+    // so the notification's own type must come from `record.type`.
+    const isWebhook = !!body?.record;
+    const rec = isWebhook ? body.record : body;
+    const { user_id, title, message, type } = rec;
+
+    const routeByRelatedType: Record<string, string> = {
+      leave_request: '/leave-management',
+      task: '/my-tasks',
+      recurring_task: '/recurring-tasks',
+      payroll: '/payroll',
+      holiday: '/holiday-management',
+      ticket: '/ticket-centre',
+      expense: '/expense-centre',
+      document: '/documents',
+      discrepancy: '/client-discrepancy-reports',
+      calendar_event: '/calendar',
+    };
+    const url: string = rec.url ?? routeByRelatedType[rec.related_type ?? ''] ?? '/notifications';
+
+    // Safety: a webhook row with no recipient must never fall through to the
+    // "no user_id = send to everyone" behaviour below.
+    if (isWebhook && !user_id) {
+      return new Response(JSON.stringify({ success: true, sent: 0, message: 'Webhook record has no user_id' }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     const vapidPublicKey = Deno.env.get('VAPID_PUBLIC_KEY') ?? '';
     const vapidPrivateKey = Deno.env.get('VAPID_PRIVATE_KEY') ?? '';

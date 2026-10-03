@@ -146,7 +146,12 @@ export default function ChatPage() {
           .select('full_name, role, department')
           .eq('id', newMsg.sender_id)
           .single();
-        setMessages(prev => [...prev, { ...newMsg, sender: senderData || undefined }]);
+        setMessages(prev => {
+          // Already have it — either our own optimistic message already got
+          // swapped for the real row, or this is a duplicate delivery.
+          if (prev.some(m => m.id === newMsg.id)) return prev;
+          return [...prev, { ...newMsg, sender: senderData || undefined }];
+        });
       })
       .on('postgres_changes', {
         event: 'UPDATE',
@@ -188,8 +193,9 @@ export default function ChatPage() {
         .limit(100);
       if (error) throw error;
       setMessages(data || []);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Load messages error:', err);
+      toast.error(err.message || 'Failed to load messages for this channel');
     } finally {
       setLoadingMessages(false);
     }
@@ -207,19 +213,51 @@ export default function ChatPage() {
           edited_at: new Date().toISOString(),
         }).eq('id', editingMessage.id);
         if (error) throw error;
+        // Realtime UPDATE handler will sync this, but update locally too in
+        // case realtime is slow — never leave the UI showing stale content.
+        setMessages(prev => prev.map(m => m.id === editingMessage.id ? { ...m, content: text, is_edited: true } : m));
         setEditingMessage(null);
       } else {
-        const { error } = await supabase.from('chat_messages').insert({
+        const tempId = `temp-${Date.now()}`;
+        const optimisticMsg: Message = {
+          id: tempId,
+          channel_id: activeChannel.id,
+          sender_id: uid,
+          content: text,
+          message_type: 'text',
+          file_url: null,
+          file_name: null,
+          reply_to_id: replyTo?.id || null,
+          created_at: new Date().toISOString(),
+          is_edited: false,
+          sender: currentUser ? { full_name: currentUser.full_name, role: currentUser.role, department: currentUser.department } : undefined,
+        } as Message;
+        // Show it immediately — don't make the sender wait on a realtime
+        // round-trip just to see their own message.
+        setMessages(prev => [...prev, optimisticMsg]);
+        setMessageText('');
+        setReplyTo(null);
+
+        const { data: inserted, error } = await supabase.from('chat_messages').insert({
           channel_id: activeChannel.id,
           sender_id: uid,
           content: text,
           message_type: 'text',
           reply_to_id: replyTo?.id || null,
-        });
-        if (error) throw error;
-        setReplyTo(null);
+        }).select().single();
+        if (error) {
+          // Roll back the optimistic message and restore what they typed.
+          setMessages(prev => prev.filter(m => m.id !== tempId));
+          setMessageText(text);
+          throw error;
+        }
+        // Swap the temp message for the real one (real id, exact server
+        // timestamp) — if the realtime event also arrives, the dedupe below
+        // in the INSERT handler prevents a duplicate.
+        if (inserted) {
+          setMessages(prev => prev.map(m => m.id === tempId ? { ...inserted, sender: optimisticMsg.sender } : m));
+        }
       }
-      setMessageText('');
     } catch (err: any) {
       toast.error(err.message || 'Failed to send message');
     } finally {
