@@ -439,7 +439,7 @@ export default function TaskBoard() {
         .select('id, title, description, priority, status, due_date, due_time, assigned_to, assigned_to_user_id, assigned_to_name, assigned_to_dept, assigned_by_name, assigned_by_dept, assigned_user_ids, checklist, tags, recurring, notify_before_minutes, is_overdue, is_template, task_category, client_org_id, client_org_name, organisation_relates_to, last_completed_date, created_at, notes, is_flagged, flag_reason, helper_user_ids, is_active, reminder_times, firm_id')
         .order('created_at', { ascending: false });
 
-      const [profileRes, usersRes, myCollabRowsRes, orgsRes, catsRes] = await Promise.all([
+      const [profileRes, usersRes, orgsRes, catsRes] = await Promise.all([
         supabase
           .from('user_profiles')
           .select('role, full_name, department')
@@ -449,7 +449,6 @@ export default function TaskBoard() {
           .from('user_profiles')
           .select('id, full_name, role, department, job_title')
           .order('full_name', { ascending: true }),
-        supabase.from('task_collaborators').select('task_id').eq('user_id', uid).eq('status', 'accepted'),
         supabase
           .from('client_organisations')
           .select('id, name')
@@ -459,25 +458,14 @@ export default function TaskBoard() {
           .select('id, name, slug, color')
           .order('name', { ascending: true }),
       ]);
-
-      const myAcceptedCollabTaskIds = (myCollabRowsRes.data || []).map((r: any) => r.task_id);
-      const role0 = profileRes.data?.role || 'employee';
-      if (role0 === 'employee') {
-        const orParts = [
-          `created_by.eq.${uid}`,
-          `assigned_to.eq.${uid}`,
-          `assigned_to_user_id.eq.${uid}`,
-          `assigned_user_ids.cs.{${uid}}`,
-          `helper_user_ids.cs.{${uid}}`,
-        ];
-        if (myAcceptedCollabTaskIds.length > 0) {
-          orParts.push(`id.in.(${myAcceptedCollabTaskIds.join(',')})`);
-        }
-        tasksQuery = tasksQuery.or(orParts.join(','));
-      } else if ((role0 === 'manager' || role0 === 'executive') && visibleFirmIds) {
+      // Firm-based visibility for everyone, regardless of role: every task
+      // belonging to a firm you're allowed to see (your own firm's members,
+      // plus any firm that's explicitly shared tasks with you via
+      // firm_data_sharing) — not just tasks you personally created/are
+      // assigned to/collaborate on.
+      if (visibleFirmIds) {
         tasksQuery = tasksQuery.in('firm_id', visibleFirmIds);
       }
-      // director: no filter — sees everything
 
       const tasksRes = await tasksQuery;
 
