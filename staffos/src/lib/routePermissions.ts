@@ -22,7 +22,6 @@ export const MANAGER_PLUS_ROUTES = [
   '/user-management',
   '/attendance-audit',
   '/leave-admin',
-  '/all-tasks',
   '/task-analytics',
   '/holiday-management',
 ];
