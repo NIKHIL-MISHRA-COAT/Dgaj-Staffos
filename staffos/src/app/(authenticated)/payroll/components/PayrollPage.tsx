@@ -220,7 +220,7 @@ export default function PayrollPage() {
   const computeSimplePayroll = (totalSalary: number, workingDays: number, daysPresent: number, daysAbsent: number, deductionPerAbsentDay: number) => {
     const perDaySalary = workingDays > 0 ? totalSalary / workingDays : 0;
     const amountPayable = perDaySalary * daysPresent;
-    const totalDeducted = daysAbsent * deductionPerAbsentDay;
+    const totalDeducted = daysAbsent * perDaySalary;
     const totalToPay = Math.max(0, totalSalary - totalDeducted);
     return { perDaySalary, amountPayable, totalDeducted, totalToPay };
   };
@@ -731,7 +731,7 @@ const handleSaveSalaryStructure = async () => {
                     <p className="text-[11px] text-red-600 dark:text-red-400">Absent Days</p>
                   </div>
                   <div>
-                    <p className="text-lg font-700 text-red-700 dark:text-red-400">{formatCurrency(selectedRecord.deduction_per_absent_day || 0)}</p>
+                    <p className="text-lg font-700 text-red-700 dark:text-red-400">{formatCurrency(selectedRecord.per_day_salary || 0)}</p>
                     <p className="text-[11px] text-red-600 dark:text-red-400">Per Absent Day</p>
                   </div>
                   <div>
