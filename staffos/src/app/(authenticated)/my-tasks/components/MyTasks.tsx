@@ -153,87 +153,162 @@ export default function MyTasks() {
     urgentHigh: 0, blocked: 0, completionRate: 0, onTimeRate: 0,
   });
 
+  // const fetchTasks = useCallback(async () => {
+  //   if (!effectiveUserId) return;
+  //   setLoading(true);
+  //   try {
+  //     // Fetch assigned tasks
+  //     const { data: assignedTasks } = await supabase
+  //       .from('tasks')
+  //       .select(`id, title, task_status, priority, due_date, due_time, start_date,
+  //         is_blocked, is_recurring, completion_percentage, creator_id, assigned_to,
+  //         created_at, completed_at, estimated_hours, client_org_id,
+  //         task_categories(name), client_organisations(name)`)
+  //       .eq('assigned_to', effectiveUserId)
+  //       // .eq('is_recurring', false)
+  //       .not('task_status', 'eq', 'cancelled');
+
+  //     // Fetch collaborating tasks
+  //     const { data: collabLinks } = await supabase
+  //       .from('task_collaborators')
+  //       .select('task_id')
+  //       .eq('user_id', effectiveUserId);
+
+  //     const collabTaskIds = (collabLinks || []).map((c: any) => c.task_id);
+  //     let collabTasks: any[] = [];
+  //     if (collabTaskIds.length > 0) {
+  //       const { data } = await supabase
+  //         .from('tasks')
+  //         .select(`id, title, task_status, priority, due_date, due_time, start_date,
+  //           is_blocked, is_recurring, completion_percentage, creator_id, assigned_to,
+  //           created_at, completed_at, estimated_hours, client_org_id,
+  //           task_categories(name), client_organisations(name)`)
+  //         .in('id', collabTaskIds)
+  //         // .eq('is_recurring', false)
+  //         .not('task_status', 'eq', 'cancelled');
+  //       collabTasks = (data || []).filter((t: any) => t.assigned_to !== effectiveUserId);
+  //     }
+
+  //     const allTasks: Task[] = [
+  //       ...(assignedTasks || []).map((t: any) => ({
+  //         ...t,
+  //         category_name: t.task_categories?.name || '—',
+  //         client_org_name: t.client_organisations?.name || '—',
+  //         is_collaborator: false,
+  //       })),
+  //       ...collabTasks.map((t: any) => ({
+  //         ...t,
+  //         category_name: t.task_categories?.name || '—',
+  //         client_org_name: t.client_organisations?.name || '—',
+  //         is_collaborator: true,
+  //       })),
+  //     ];
+
+  //     setTasks(allTasks);
+
+  //     // Calculate KPIs
+  //     const today = new Date().toISOString().split('T')[0];
+  //     const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+  //     const weekStartStr = weekStart.toISOString().split('T')[0];
+  //     const next7 = new Date(); next7.setDate(next7.getDate() + 7);
+  //     const next7Str = next7.toISOString().split('T')[0];
+
+  //     const active = allTasks.filter(t => t.task_status !== 'completed' && t.task_status !== 'cancelled');
+  //     const completed = allTasks.filter(t => t.task_status === 'completed');
+  //     const overdueList = allTasks.filter(t => isOverdue(t, today));
+  //     const completedOnTime = completed.filter(t => t.completed_at && t.due_date && t.completed_at.split('T')[0] <= t.due_date);
+
+  //     setKpis({
+  //       dueToday: active.filter(t => t.due_date === today).length,
+  //       overdue: overdueList.length,
+  //       dueNext7: active.filter(t => t.due_date && t.due_date > today && t.due_date <= next7Str).length,
+  //       completedThisWeek: completed.filter(t => t.completed_at && t.completed_at >= weekStartStr).length,
+  //       urgentHigh: active.filter(t => t.priority === 'critical' || t.priority === 'high').length,
+  //       blocked: active.filter(t => t.is_blocked).length,
+  //       completionRate: allTasks.length > 0 ? (completed.length / allTasks.length) * 100 : 0,
+  //       onTimeRate: completed.length > 0 ? (completedOnTime.length / completed.length) * 100 : 0,
+  //     });
+  //   } catch (err: any) {
+  //     toast.error('Failed to load tasks');
+  //   } finally {
+  //     setLoading(false);
+  //   }
+  // }, [effectiveUserId]);
+
   const fetchTasks = useCallback(async () => {
-    if (!effectiveUserId) return;
-    setLoading(true);
-    try {
-      // Fetch assigned tasks
-      const { data: assignedTasks } = await supabase
+  if (!effectiveUserId) {
+    console.log('No effectiveUserId yet');
+    return;
+  }
+  setLoading(true);
+  try {
+    const cols = `id, title, task_status, priority, due_date, due_time, start_date,
+      is_blocked, is_recurring, completion_percentage, creator_id, assigned_to,
+      created_at, completed_at, estimated_hours`;
+
+    const { data: assignedTasks, error: err1 } = await supabase
+      .from('tasks')
+      .select(cols)
+      .eq('assigned_to', effectiveUserId)
+      .neq('task_status', 'cancelled');
+
+    console.log('effectiveUserId:', effectiveUserId);
+    console.log('assigned count:', assignedTasks?.length, 'error:', err1);
+    if (err1) { toast.error(err1.message); throw err1; }
+
+    const { data: collabLinks, error: err2 } = await supabase
+      .from('task_collaborators')
+      .select('task_id')
+      .eq('user_id', effectiveUserId);
+    if (err2) console.log('collab error:', err2);
+
+    const collabTaskIds = (collabLinks || []).map((c: any) => c.task_id);
+    let collabTasks: any[] = [];
+    if (collabTaskIds.length > 0) {
+      const { data, error: err3 } = await supabase
         .from('tasks')
-        .select(`id, title, task_status, priority, due_date, due_time, start_date,
-          is_blocked, is_recurring, completion_percentage, creator_id, assigned_to,
-          created_at, completed_at, estimated_hours, client_org_id,
-          task_categories(name), client_organisations(name)`)
-        .eq('assigned_to', effectiveUserId)
-        .eq('is_recurring', false)
-        .not('task_status', 'eq', 'cancelled');
-
-      // Fetch collaborating tasks
-      const { data: collabLinks } = await supabase
-        .from('task_collaborators')
-        .select('task_id')
-        .eq('user_id', effectiveUserId);
-
-      const collabTaskIds = (collabLinks || []).map((c: any) => c.task_id);
-      let collabTasks: any[] = [];
-      if (collabTaskIds.length > 0) {
-        const { data } = await supabase
-          .from('tasks')
-          .select(`id, title, task_status, priority, due_date, due_time, start_date,
-            is_blocked, is_recurring, completion_percentage, creator_id, assigned_to,
-            created_at, completed_at, estimated_hours, client_org_id,
-            task_categories(name), client_organisations(name)`)
-          .in('id', collabTaskIds)
-          .eq('is_recurring', false)
-          .not('task_status', 'eq', 'cancelled');
-        collabTasks = (data || []).filter((t: any) => t.assigned_to !== effectiveUserId);
-      }
-
-      const allTasks: Task[] = [
-        ...(assignedTasks || []).map((t: any) => ({
-          ...t,
-          category_name: t.task_categories?.name || '—',
-          client_org_name: t.client_organisations?.name || '—',
-          is_collaborator: false,
-        })),
-        ...collabTasks.map((t: any) => ({
-          ...t,
-          category_name: t.task_categories?.name || '—',
-          client_org_name: t.client_organisations?.name || '—',
-          is_collaborator: true,
-        })),
-      ];
-
-      setTasks(allTasks);
-
-      // Calculate KPIs
-      const today = new Date().toISOString().split('T')[0];
-      const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-      const weekStartStr = weekStart.toISOString().split('T')[0];
-      const next7 = new Date(); next7.setDate(next7.getDate() + 7);
-      const next7Str = next7.toISOString().split('T')[0];
-
-      const active = allTasks.filter(t => t.task_status !== 'completed' && t.task_status !== 'cancelled');
-      const completed = allTasks.filter(t => t.task_status === 'completed');
-      const overdueList = allTasks.filter(t => isOverdue(t, today));
-      const completedOnTime = completed.filter(t => t.completed_at && t.due_date && t.completed_at.split('T')[0] <= t.due_date);
-
-      setKpis({
-        dueToday: active.filter(t => t.due_date === today).length,
-        overdue: overdueList.length,
-        dueNext7: active.filter(t => t.due_date && t.due_date > today && t.due_date <= next7Str).length,
-        completedThisWeek: completed.filter(t => t.completed_at && t.completed_at >= weekStartStr).length,
-        urgentHigh: active.filter(t => t.priority === 'critical' || t.priority === 'high').length,
-        blocked: active.filter(t => t.is_blocked).length,
-        completionRate: allTasks.length > 0 ? (completed.length / allTasks.length) * 100 : 0,
-        onTimeRate: completed.length > 0 ? (completedOnTime.length / completed.length) * 100 : 0,
-      });
-    } catch (err: any) {
-      toast.error('Failed to load tasks');
-    } finally {
-      setLoading(false);
+        .select(cols)
+        .in('id', collabTaskIds)
+        .neq('task_status', 'cancelled');
+      if (err3) console.log('collab tasks error:', err3);
+      collabTasks = (data || []).filter((t: any) => t.assigned_to !== effectiveUserId);
     }
-  }, [effectiveUserId]);
+
+    const allTasks: Task[] = [
+      ...(assignedTasks || []).map((t: any) => ({ ...t, category_name: '—', client_org_name: '—', is_collaborator: false })),
+      ...collabTasks.map((t: any) => ({ ...t, category_name: '—', client_org_name: '—', is_collaborator: true })),
+    ];
+
+    setTasks(allTasks);
+
+    // KPIs (keep your existing KPI code below this line, unchanged)
+    const today = new Date().toISOString().split('T')[0];
+    const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+    const next7 = new Date(); next7.setDate(next7.getDate() + 7);
+    const next7Str = next7.toISOString().split('T')[0];
+
+    const active = allTasks.filter(t => t.task_status !== 'completed' && t.task_status !== 'cancelled');
+    const completed = allTasks.filter(t => t.task_status === 'completed');
+    const overdueList = allTasks.filter(t => isOverdue(t, today));
+    const completedOnTime = completed.filter(t => t.completed_at && t.due_date && t.completed_at.split('T')[0] <= t.due_date);
+
+    setKpis({
+      dueToday: active.filter(t => t.due_date === today).length,
+      overdue: overdueList.length,
+      dueNext7: active.filter(t => t.due_date && t.due_date > today && t.due_date <= next7Str).length,
+      completedThisWeek: completed.filter(t => t.completed_at && t.completed_at >= weekStartStr).length,
+      urgentHigh: active.filter(t => t.priority === 'critical' || t.priority === 'high').length,
+      blocked: active.filter(t => t.is_blocked).length,
+      completionRate: allTasks.length > 0 ? (completed.length / allTasks.length) * 100 : 0,
+      onTimeRate: completed.length > 0 ? (completedOnTime.length / completed.length) * 100 : 0,
+    });
+  } catch (err: any) {
+    toast.error('Failed to load tasks');
+  } finally {
+    setLoading(false);
+  }
+}, [effectiveUserId]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
