@@ -221,7 +221,7 @@ export default function PayrollPage() {
     const perDaySalary = workingDays > 0 ? totalSalary / workingDays : 0;
     const amountPayable = perDaySalary * daysPresent;
     const totalDeducted = daysAbsent * deductionPerAbsentDay;
-    const totalToPay = amountPayable - totalDeducted;
+    const totalToPay = Math.max(0, totalSalary - totalDeducted);
     return { perDaySalary, amountPayable, totalDeducted, totalToPay };
   };
 
