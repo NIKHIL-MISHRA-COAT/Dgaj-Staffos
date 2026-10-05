@@ -33,8 +33,8 @@ const navItems: NavItem[] = [
   { id: 'nav-payroll', label: 'Payroll', icon: Wallet, href: '/payroll', group: 'core' },
   { id: 'nav-profile', label: 'My Profile', icon: UserCircle, href: '/employee-profile', group: 'core' },
 
-  { id: 'nav-my-tasks', label: 'My Tasks', icon: ListTodo, href: '/my-tasks', group: 'tasks' },
-  { id: 'nav-all-tasks', label: 'All Tasks', icon: CheckSquare, href: '/all-tasks', group: 'tasks', managerOnly: true },
+  // { id: 'nav-my-tasks', label: 'My Tasks', icon: ListTodo, href: '/all-tasks', group: 'tasks' },
+  { id: 'nav-all-tasks', label: 'All Tasks', icon: CheckSquare, href: '/all-tasks', group: 'tasks' },
   { id: 'nav-task-analytics', label: 'Task Analytics', icon: PieChart, href: '/task-analytics', group: 'tasks', managerOnly: true },
   { id: 'nav-recurring-tasks', label: 'Recurring Tasks', icon: Repeat, href: '/recurring-tasks', group: 'tasks' },
 

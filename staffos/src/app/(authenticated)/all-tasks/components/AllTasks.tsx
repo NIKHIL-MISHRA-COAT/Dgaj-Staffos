@@ -775,6 +775,8 @@ import { toast, Toaster } from 'sonner';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
+import { useVisibleFirms } from '@/lib/useVisibleFirms';
+import FirmBadge from '@/components/FirmBadge';
 
 /* ───────────────────────── Types ───────────────────────── */
 
@@ -808,6 +810,7 @@ interface Row {
   completed_at: string | null;
   created_at: string;
   collaborator: boolean;
+  firm_id: string | null;
 }
 
 interface UserProfile { id: string; full_name: string; role: string; department: string | null; }
@@ -977,12 +980,13 @@ interface TaskRowProps {
   expanded: boolean;
   busy: boolean;
   showAssignee: boolean;
+  firm?: { name: string; code: string } | null;
   onToggle: () => void;
   onComplete: () => void;
   onStatus: (s: TaskStatus) => void;
 }
 
-function TaskRow({ row, today, expanded, busy, showAssignee, onToggle, onComplete, onStatus }: TaskRowProps) {
+function TaskRow({ row, today, expanded, busy, showAssignee, firm, onToggle, onComplete, onStatus }: TaskRowProps) {
   const sc = STATUS_CONFIG[row.status];
   const pc = PRIORITY_CONFIG[row.priority];
   const done = row.status === 'completed';
@@ -1050,6 +1054,7 @@ function TaskRow({ row, today, expanded, busy, showAssignee, onToggle, onComplet
                 <User size={11} />{row.assignee}
               </span>
             )}
+            {showAssignee && firm && <FirmBadge firmName={firm.name} firmCode={firm.code} />}
           </div>
 
           {row.progress > 0 && !done && (
@@ -1251,6 +1256,7 @@ export default function TasksHub() {
   const uid = effectiveUserId;
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
+  const { firms: visibleFirms } = useVisibleFirms();
 
   const [role, setRole] = useState<string | null>(null);
   const [userName, setUserName] = useState('');
@@ -1275,6 +1281,8 @@ export default function TasksHub() {
   const [clientF, setClientF] = useState('all');
   const [assigneeF, setAssigneeF] = useState('all');
   const [showCompleted, setShowCompleted] = useState(false);
+  const [firms, setFirms] = useState<{ id: string; name: string; code: string }[]>([]);
+  const [firmF, setFirmF] = useState('all');
 
   const isDirector = role === 'director';
   const isManager = role === 'manager' || role === 'executive';
@@ -1298,6 +1306,9 @@ export default function TasksHub() {
       setUsers(u.data || []);
       setCategories(c.data || []);
       setClients(o.data || []);
+      // Firm names for the firm dropdown (falls back to "Firm 1, Firm 2…" if this table can't be read)
+      const f = await supabase.from('firms').select('*');
+      if (!f.error) setFirms((f.data || []).map((x: any) => ({ id: x.id, name: x.name || x.firm_name || x.title || '' })));
     })();
   }, [uid, supabase]);
 
@@ -1388,7 +1399,7 @@ export default function TasksHub() {
         assigned_by: '', client: t.client_org_name || '', category: '',
         recurring: true, frequency: t.recurring_tasks?.frequency || null,
         blocked: false, progress: 0, est_hours: 0,
-        completed_at: t.completion_datetime || null, created_at: t.created_at || '', collaborator: false,
+        completed_at: t.completion_datetime || null, created_at: t.created_at || '', collaborator: false, firm_id: null,
       };
     }
     const ids: string[] = Array.isArray(t.assigned_user_ids) ? t.assigned_user_ids : [];
@@ -1411,19 +1422,29 @@ export default function TasksHub() {
       progress: Number(t.completion_percentage) || 0, est_hours: Number(t.estimated_hours) || 0,
       completed_at: t.completed_at || null, created_at: t.created_at || '',
       collaborator: !!t.__collab && !mine,
+      firm_id: t.firm_id || null,
     };
   }).filter(r => r.status !== 'cancelled'), [rawTasks, userMap, catMap, catSlugMap, clientMap, uid, userName]);
 
   /* ── derived: type filter → KPIs → visible list ── */
-  const typed = useMemo(() => rows.filter(r =>
-    typeFilter === 'all' ? true : typeFilter === 'recurring' ? r.recurring : !r.recurring
-  ), [rows, typeFilter]);
+  const firmRows = useMemo(
+    () => (firmF === 'all' ? rows : rows.filter(r => r.firm_id === firmF)),
+    [rows, firmF]
+  );
 
-  const typeCounts = useMemo(() => ({
-    all: rows.length,
-    recurring: rows.filter(r => r.recurring).length,
-    oneTime: rows.filter(r => !r.recurring).length,
-  }), [rows]);
+  const typed = useMemo(() => firmRows.filter(r =>
+    typeFilter === 'all' ? true : typeFilter === 'recurring' ? r.recurring : !r.recurring
+  ), [firmRows, typeFilter]);
+
+  // Badge counts match what the list shows: completed tasks are hidden unless "Show completed" is on
+  const typeCounts = useMemo(() => {
+    const countable = firmRows.filter(r => showCompleted || r.status !== 'completed');
+    return {
+      all: countable.length,
+      recurring: countable.filter(r => r.recurring).length,
+      oneTime: countable.filter(r => !r.recurring).length,
+    };
+  }, [firmRows, showCompleted]);
 
   const weekStart = useMemo(() => {
     const d = new Date();
@@ -1491,7 +1512,16 @@ export default function TasksHub() {
 
   const categoryOptions = useMemo(() => Array.from(new Set(rows.map(r => r.category).filter(Boolean))).sort(), [rows]);
   const clientOptions = useMemo(() => Array.from(new Set(rows.map(r => r.client).filter(Boolean))).sort(), [rows]);
-  const assigneeOptions = useMemo(() => Array.from(new Set(rows.flatMap(r => r.assigneeNames))).sort(), [rows]);
+  const assigneeOptions = useMemo(() => Array.from(new Set(firmRows.flatMap(r => r.assigneeNames))).sort(), [firmRows]);
+
+  const firmOptions = useMemo(() => {
+    const ids = new Set(rows.map(r => r.firm_id).filter(Boolean) as string[]);
+    if (isDirector) firms.forEach(f => ids.add(f.id));
+    const names = Object.fromEntries(firms.map(f => [f.id, f.name]));
+    return Array.from(ids)
+      .map((id, i) => ({ id, name: names[id] || `Firm ${i + 1}` }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [rows, firms, isDirector]);
 
   const activeFilters = [statusF, priorityF, categoryF, clientF, assigneeF].filter(f => f !== 'all').length;
   const clearAll = () => {
@@ -1617,7 +1647,7 @@ export default function TasksHub() {
             {canToggleScope && (
               <Segmented<Scope>
                 value={scope}
-                onChange={v => { setScope(v); setExpanded(null); setAssigneeF('all'); }}
+                onChange={v => { setScope(v); setExpanded(null); setAssigneeF('all'); setFirmF('all'); }}
                 options={[
                   { value: 'mine', label: 'My Tasks', icon: User },
                   { value: 'all', label: isDirector ? 'All Tasks · All Firms' : 'All Tasks · My Firm', icon: Users },
@@ -1633,6 +1663,20 @@ export default function TasksHub() {
                 { value: 'recurring', label: 'Recurring', icon: Repeat, count: typeCounts.recurring },
               ]}
             />
+            {effectiveScope === 'all' && firmOptions.length > 1 && (
+              <div className="relative">
+                <Building2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                <select
+                  value={firmF}
+                  onChange={e => { setFirmF(e.target.value); setAssigneeF('all'); }}
+                  className="pl-8 pr-8 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-medium appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">{isDirector ? 'All firms' : 'All my firms'}</option>
+                  {firmOptions.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                </select>
+                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              </div>
+            )}
           </div>
         </div>
       </div>
