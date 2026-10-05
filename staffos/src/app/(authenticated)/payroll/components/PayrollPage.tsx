@@ -363,23 +363,52 @@ export default function PayrollPage() {
     }
   };
 
+const handleSaveSalaryStructure = async () => {
+  if (!showSalaryModal || !parseFloat(salaryForm.basic_salary)) {
+    toast.error('Basic salary is required'); return;
+  }
+  try {
+    const { error } = await supabase.from('salary_structures').upsert({
+      user_id: showSalaryModal.id,
+      firm_id: showSalaryModal.firm_id || null,
+      basic_salary: parseFloat(salaryForm.basic_salary),
+      hra_percent: parseFloat(salaryForm.hra_percent),
+      transport_allowance: parseFloat(salaryForm.transport_allowance),
+      other_allowances: parseFloat(salaryForm.other_allowances),
+      pf_percent: parseFloat(salaryForm.pf_percent),
+      esi_percent: parseFloat(salaryForm.esi_percent),
+      tds_percent: parseFloat(salaryForm.tds_percent),
+      created_by: effectiveUserId,
+    }, { onConflict: 'user_id' });
+    if (error) throw error;
+    toast.success('Salary structure saved');
+    setShowSalaryModal(null);
+    init();
+  } catch (err: any) {
+    toast.error(err.message || 'Failed to save salary structure');
+  }
+};
+
   const handleApprove = async (record: PayrollRecord) => {
-    if (isLockedForUser(record)) {
-      toast.error('This payslip is already approved and locked. Only a director can make further changes.');
-      return;
-    }
-    try {
-      await supabase.from('payroll_records').update({
-        status: 'paid',
-        payment_date: new Date().toISOString().split('T')[0],
-        approved_by: effectiveUserId,
-        approved_at: new Date().toISOString(),
-      }).eq('id', record.id);
-      toast.success('Payslip approved');
-      setSelectedRecord(null);
-      init();
-    } catch { toast.error('Failed to approve'); }
-  };
+  if (isLockedForUser(record)) {
+    toast.error('This payslip is already approved and locked. Only a director can make further changes.');
+    return;
+  }
+  try {
+    const { error } = await supabase.from('payroll_records').update({
+      status: 'paid',
+      payment_date: new Date().toISOString().split('T')[0],
+      approved_by: effectiveUserId,
+      approved_at: new Date().toISOString(),
+    }).eq('id', record.id);
+    if (error) throw error;
+    toast.success('Payslip approved');
+    setSelectedRecord(null);
+    init();
+  } catch (err: any) {
+    toast.error(err.message || 'Failed to approve');
+  }
+};
 
   const exportPayroll = () => {
     const filtered = records.filter(r => !searchQuery || r.employee?.full_name.toLowerCase().includes(searchQuery.toLowerCase()));
