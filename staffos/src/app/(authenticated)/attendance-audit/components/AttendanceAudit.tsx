@@ -147,8 +147,17 @@ export default function AttendanceAudit() {
     supabase.rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' }).then(({ data: visibleFirmIds }) => {
       let query = supabase.from('user_profiles').select('id, full_name, job_title, department').order('full_name');
       if (visibleFirmIds) query = query.in('firm_id', visibleFirmIds);
-      query.then(({ data }) => {
-        if (data) setEmployees(data as AuditEmployee[]);
+      query.then(async ({ data }) => {
+        let roster = data || [];
+        // Always include the viewer themselves — a director/manager should
+        // always be able to see and review their own attendance here, even
+        // if their own profile's firm_id doesn't happen to match the filter
+        // above (e.g. it was never set).
+        if (!roster.some((e) => e.id === effectiveUserId)) {
+          const { data: self } = await supabase.from('user_profiles').select('id, full_name, job_title, department').eq('id', effectiveUserId).single();
+          if (self) roster = [self, ...roster];
+        }
+        setEmployees(roster as AuditEmployee[]);
       });
     });
   }, [isManagerOrDirector, effectiveUserId]);

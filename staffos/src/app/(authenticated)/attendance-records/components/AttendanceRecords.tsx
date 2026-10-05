@@ -31,6 +31,7 @@ interface AttendanceCorrection {
   work_date: string;
   requested_clock_in: string | null;
   requested_clock_out: string | null;
+  requested_status: 'present' | 'half_day' | null;
   reason: string;
   status: CorrectionStatus;
   reviewed_by: string | null;
@@ -45,6 +46,7 @@ interface CorrectionForm {
   work_date: string;
   requested_clock_in: string;
   requested_clock_out: string;
+  requested_status: 'present' | 'half_day' | '';
   reason: string;
 }
 
@@ -106,6 +108,7 @@ export default function AttendanceRecords() {
     work_date: '',
     requested_clock_in: '',
     requested_clock_out: '',
+    requested_status: '',
     reason: '',
   });
   const [submittingCorrection, setSubmittingCorrection] = useState(false);
@@ -249,6 +252,7 @@ export default function AttendanceRecords() {
       work_date: record?.work_date || '',
       requested_clock_in: record?.clock_in ? new Date(record.clock_in).toISOString().slice(0, 16) : '',
       requested_clock_out: record?.clock_out ? new Date(record.clock_out).toISOString().slice(0, 16) : '',
+      requested_status: '',
       reason: '',
     });
     setShowCorrectionModal(true);
@@ -260,6 +264,10 @@ export default function AttendanceRecords() {
     if (!uid) return;
     if (!correctionForm.work_date) { toast.error('Please select the date'); return; }
     if (!correctionForm.reason.trim()) { toast.error('Please provide a reason'); return; }
+    if (!correctionForm.requested_status && !correctionForm.requested_clock_in && !correctionForm.requested_clock_out) {
+      toast.error('Choose Full Day or Half Day, or provide a corrected clock-in/out time');
+      return;
+    }
 
     setSubmittingCorrection(true);
     try {
@@ -269,6 +277,7 @@ export default function AttendanceRecords() {
         work_date: correctionForm.work_date,
         requested_clock_in: correctionForm.requested_clock_in ? new Date(correctionForm.requested_clock_in).toISOString() : null,
         requested_clock_out: correctionForm.requested_clock_out ? new Date(correctionForm.requested_clock_out).toISOString() : null,
+        requested_status: correctionForm.requested_status || null,
         reason: correctionForm.reason.trim(),
         status: 'pending',
       };
@@ -277,7 +286,7 @@ export default function AttendanceRecords() {
       if (error) throw error;
       toast.success('Correction request submitted successfully');
       setShowCorrectionModal(false);
-      setCorrectionForm({ attendance_record_id: '', work_date: '', requested_clock_in: '', requested_clock_out: '', reason: '' });
+      setCorrectionForm({ attendance_record_id: '', work_date: '', requested_clock_in: '', requested_clock_out: '', requested_status: '', reason: '' });
       fetchCorrections();
       setActiveTab('corrections');
     } catch (err: any) {
@@ -287,9 +296,15 @@ export default function AttendanceRecords() {
     }
   };
 
+  // Approver can pick Present/Half Day themselves before approving — defaults
+  // to whatever the employee requested, but the manager/director isn't stuck
+  // with it.
+  const [approvalStatusChoice, setApprovalStatusChoice] = useState<Record<string, 'present' | 'half_day' | ''>>({});
+
   const handleApproveCorrection = async (correctionId: string, correction: AttendanceCorrection) => {
     const uid = effectiveUserId;
     if (!uid) return;
+    const finalStatus = approvalStatusChoice[correctionId] ?? correction.requested_status ?? '';
     try {
       const { error: corrError } = await supabase
         .from('attendance_corrections')
@@ -297,17 +312,28 @@ export default function AttendanceRecords() {
         .eq('id', correctionId);
       if (corrError) throw corrError;
 
-      // Apply correction to attendance record if linked
+      const updates: any = { updated_at: new Date().toISOString() };
+      if (correction.requested_clock_in) updates.clock_in = correction.requested_clock_in;
+      if (correction.requested_clock_out) updates.clock_out = correction.requested_clock_out;
+      if (correction.requested_clock_in && correction.requested_clock_out) {
+        const diffMs = new Date(correction.requested_clock_out).getTime() - new Date(correction.requested_clock_in).getTime();
+        updates.total_hours = Math.max(0, Math.round((diffMs / 3600000) * 100) / 100);
+      }
+      // The whole point of the status choice: actually flip the attendance
+      // record to Present/Half Day, not just adjust times. Previously this
+      // never happened at all — approving did nothing to the day's status.
+      if (finalStatus) updates.status = finalStatus;
+
       if (correction.attendance_record_id) {
-        const updates: any = { updated_at: new Date().toISOString() };
-        if (correction.requested_clock_in) updates.clock_in = correction.requested_clock_in;
-        if (correction.requested_clock_out) updates.clock_out = correction.requested_clock_out;
-        // Recalculate total hours if both times present
-        if (correction.requested_clock_in && correction.requested_clock_out) {
-          const diffMs = new Date(correction.requested_clock_out).getTime() - new Date(correction.requested_clock_in).getTime();
-          updates.total_hours = Math.max(0, Math.round((diffMs / 3600000) * 100) / 100);
-        }
         await supabase.from('attendance_records').update(updates).eq('id', correction.attendance_record_id);
+      } else {
+        // No existing row for this date (shouldn't normally happen since
+        // auto-absent always creates one, but handle it defensively) —
+        // create it so the approval still takes effect.
+        await supabase.from('attendance_records').upsert(
+          { user_id: correction.user_id, work_date: correction.work_date, status: finalStatus || 'present', is_manual_entry: true, ...updates },
+          { onConflict: 'user_id,work_date' }
+        );
       }
 
       toast.success('Correction approved and applied');
@@ -759,6 +785,40 @@ export default function AttendanceRecords() {
                           <p className="font-500 text-slate-700">{formatTime(corr.requested_clock_out)}</p>
                         </div>
                       </div>
+                      {corr.requested_status && (
+                        <div>
+                          <p className="text-slate-400 mb-0.5 text-xs">Requested Day Status</p>
+                          <p className="font-500 text-slate-700 text-xs">{corr.requested_status === 'present' ? 'Full Day' : 'Half Day'}</p>
+                        </div>
+                      )}
+                      {corr.status === 'pending' && (
+                        <div>
+                          <p className="text-slate-400 mb-1 text-xs">Approve as (you can change this)</p>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {([
+                              ['', 'No status change'],
+                              ['present', 'Full Day'],
+                              ['half_day', 'Half Day'],
+                            ] as const).map(([val, label]) => {
+                              const current = approvalStatusChoice[corr.id] ?? corr.requested_status ?? '';
+                              return (
+                                <button
+                                  key={label}
+                                  type="button"
+                                  onClick={() => setApprovalStatusChoice((prev) => ({ ...prev, [corr.id]: val }))}
+                                  className={`text-[11px] font-600 px-2 py-1.5 rounded-lg border transition-colors ${
+                                    current === val
+                                      ? 'bg-blue-600 border-blue-600 text-white'
+                                      : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                       {corr.status === 'pending' && (
                         <div className="flex items-center gap-2 pt-1">
                           <button
@@ -917,6 +977,30 @@ export default function AttendanceRecords() {
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-600 text-slate-700 mb-1.5">Mark this day as</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    ['', 'Just fix time'],
+                    ['present', 'Full Day'],
+                    ['half_day', 'Half Day'],
+                  ] as const).map(([val, label]) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setCorrectionForm((prev) => ({ ...prev, requested_status: val }))}
+                      className={`text-xs font-600 px-3 py-2 rounded-lg border transition-colors ${
+                        correctionForm.requested_status === val
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">Pick Full Day or Half Day for a day you were auto-marked absent — or just fix your clock-in/out time below.</p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
