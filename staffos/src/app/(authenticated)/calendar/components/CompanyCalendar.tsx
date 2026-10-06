@@ -7,7 +7,15 @@ import { Toaster } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
 
-type EventType = 'meeting' | 'task' | 'reminder' | 'holiday' | 'review' | 'payroll';
+type EventType = 'meeting' | 'task' | 'reminder' | 'holiday' | 'review' | 'payroll' | 'present' | 'absent' | 'leave';
+
+// Generated from attendance / leave data — shown on the calendar but not user-creatable
+const SYSTEM_EVENT_TYPES: EventType[] = ['present', 'absent', 'leave'];
+const isSyntheticEvent = (id: string) => /^(task|holiday|leave|salary|att)-/.test(id);
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+// Local date string. toISOString() shifts to the previous day in IST and drops the month's last day.
+const toDateStr = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 type RecurringType = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly';
 type PriorityType = 'low' | 'medium' | 'high' | 'urgent';
 
@@ -34,6 +42,9 @@ const eventTypeConfig: Record<EventType, { label: string; color: string; bg: str
   holiday: { label: 'Holiday', color: 'text-emerald-700', bg: 'bg-emerald-100', dot: 'bg-emerald-500' },
   review: { label: 'Review', color: 'text-rose-700', bg: 'bg-rose-100', dot: 'bg-rose-500' },
   payroll: { label: 'Salary Day', color: 'text-green-700', bg: 'bg-green-100', dot: 'bg-green-500' },
+  present: { label: 'Present', color: 'text-lime-700', bg: 'bg-lime-100', dot: 'bg-lime-500' },
+  absent: { label: 'Absent', color: 'text-red-700', bg: 'bg-red-100', dot: 'bg-red-500' },
+  leave: { label: 'Leave', color: 'text-teal-700', bg: 'bg-teal-100', dot: 'bg-teal-500' },
 };
 
 const priorityConfig: Record<PriorityType, { label: string; color: string; bg: string }> = {
@@ -119,6 +130,9 @@ export default function CompanyCalendar() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'company_holidays' }, () => {
         scheduleRefresh();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_records' }, () => {
+        scheduleRefresh();
+      })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
@@ -128,7 +142,7 @@ export default function CompanyCalendar() {
     setLoading(true);
     try {
       const monthStart = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-01`;
-      const monthEnd = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0];
+      const monthEnd = toDateStr(new Date(currentYear, currentMonth + 1, 0));
       const uid = effectiveUserId;
 
       // Fetch calendar events (user-specific + all-department) — include recurring events from any date
@@ -184,29 +198,32 @@ export default function CompanyCalendar() {
         created_by: h.created_by,
       }));
 
-      // Fetch approved leave for this user in the month
+      // Approved + pending leave for this user overlapping the month
       let leaveEvents: CalendarEvent[] = [];
+      const leaveDates = new Set<string>(); // approved leave days — these must never show as absent
       if (uid) {
         const { data: leaves } = await supabase
           .from('leave_requests')
           .select('id, leave_type, start_date, end_date, status')
           .eq('user_id', uid)
           .in('status', ['approved', 'pending'])
-          .or(`start_date.lte.${monthEnd},end_date.gte.${monthStart}`);
+          .lte('start_date', monthEnd)
+          .gte('end_date', monthStart);
 
         (leaves || []).forEach((leave: any) => {
-          // Create an event for each day of the leave within the month
-          const start = new Date(leave.start_date);
-          const end = new Date(leave.end_date);
-          const cur = new Date(start);
-          while (cur <= end) {
-            const dateStr = cur.toISOString().split('T')[0];
+          const [sy, sm, sd] = String(leave.start_date).slice(0, 10).split('-').map(Number);
+          const [ey, em, ed] = String(leave.end_date).slice(0, 10).split('-').map(Number);
+          const cur = new Date(sy, sm - 1, sd);
+          const last = new Date(ey, em - 1, ed);
+          while (cur <= last) {
+            const dateStr = toDateStr(cur);
             if (dateStr >= monthStart && dateStr <= monthEnd) {
+              if (leave.status === 'approved') leaveDates.add(dateStr);
               leaveEvents.push({
                 id: `leave-${leave.id}-${dateStr}`,
-                title: `🏖️ ${leave.leave_type.replace('_', ' ')} Leave`,
+                title: `🏖️ ${String(leave.leave_type || '').replace('_', ' ')} Leave`,
                 event_date: dateStr,
-                event_type: 'reminder' as EventType,
+                event_type: 'leave' as EventType,
                 recurring: 'none' as RecurringType,
                 description: leave.status === 'approved' ? 'Approved Leave' : 'Pending Leave',
                 created_by: uid,
@@ -215,6 +232,69 @@ export default function CompanyCalendar() {
             cur.setDate(cur.getDate() + 1);
           }
         });
+      }
+
+      // This user's attendance for the month: Present / Absent markers.
+      // Holiday and leave days never get an Absent marker, even if an
+      // auto-generated absent row exists for them.
+      const holidayDates = new Set<string>((holidays || []).map((h: any) => String(h.holiday_date).slice(0, 10)));
+      let attendanceEvents: CalendarEvent[] = [];
+      if (uid) {
+        const { data: att } = await supabase
+          .from('attendance_records')
+          .select('id, work_date, status, clock_in, clock_out')
+          .eq('user_id', uid)
+          .gte('work_date', monthStart)
+          .lte('work_date', monthEnd);
+
+        const hhmm = (ts: string | null) => ts ? new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+        (att || []).forEach((a: any) => {
+          const dateStr = String(a.work_date).slice(0, 10);
+          const worked = ['present', 'late', 'half_day', 'work_from_home'].includes(a.status) || !!a.clock_in;
+          if (worked && a.status !== 'absent') {
+            const label = a.status === 'late' ? 'Late' : a.status === 'half_day' ? 'Half Day' : a.status === 'work_from_home' ? 'WFH' : 'Present';
+            attendanceEvents.push({
+              id: `att-${a.id}`,
+              title: `✅ ${label}`,
+              event_date: dateStr,
+              event_type: 'present' as EventType,
+              recurring: 'none' as RecurringType,
+              description: a.clock_in ? `${hhmm(a.clock_in)}${a.clock_out ? ` – ${hhmm(a.clock_out)}` : ''}` : undefined,
+              created_by: uid,
+            });
+          } else if (a.status === 'absent') {
+            if (holidayDates.has(dateStr) || leaveDates.has(dateStr)) return; // holiday / leave wins over auto-absent
+            attendanceEvents.push({
+              id: `att-${a.id}`,
+              title: '❌ Absent',
+              event_date: dateStr,
+              event_type: 'absent' as EventType,
+              recurring: 'none' as RecurringType,
+              created_by: uid,
+            });
+          }
+        });
+
+        // Past working days with no present record, no holiday and no APPROVED leave -> Absent
+        // (covers missing rows and leave-status rows that have no approved application)
+        const todayStr = toDateStr(new Date());
+        const workedDates = new Set<string>(attendanceEvents.filter(e => e.event_type === 'present').map(e => e.event_date));
+        const absentDates = new Set<string>(attendanceEvents.filter(e => e.event_type === 'absent').map(e => e.event_date));
+        const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
+        for (let d = 1; d <= lastDay; d++) {
+          const ds = `${currentYear}-${pad2(currentMonth + 1)}-${pad2(d)}`;
+          const dow = new Date(currentYear, currentMonth, d).getDay();
+          if (ds >= todayStr || dow === 0 || dow === 6) continue;
+          if (workedDates.has(ds) || absentDates.has(ds) || holidayDates.has(ds) || leaveDates.has(ds)) continue;
+          attendanceEvents.push({
+            id: `att-missing-${ds}`,
+            title: '❌ Absent',
+            event_date: ds,
+            event_type: 'absent' as EventType,
+            recurring: 'none' as RecurringType,
+            created_by: uid,
+          });
+        }
       }
 
       // Recurring "Salary Day" marker, driven by the Payroll setting in Firm
@@ -242,7 +322,7 @@ export default function CompanyCalendar() {
         }];
       }
 
-      setEvents([...(calData || []), ...taskEvents, ...holidayEvents, ...leaveEvents, ...payrollEvents]);
+      setEvents([...(calData || []), ...taskEvents, ...holidayEvents, ...leaveEvents, ...attendanceEvents, ...payrollEvents]);
     } catch (err) {
       console.error('Calendar fetch error:', err);
     } finally {
@@ -496,12 +576,14 @@ export default function CompanyCalendar() {
                           <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">{ev.department}</p>
                         )}
                       </div>
-                      <button
-                        onClick={() => handleDeleteEvent(ev.id)}
-                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/30 transition-all"
-                      >
-                        <X size={12} className="text-slate-400 hover:text-red-500" />
-                      </button>
+                      {!isSyntheticEvent(ev.id) && (
+                        <button
+                          onClick={() => handleDeleteEvent(ev.id)}
+                          className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/30 transition-all"
+                        >
+                          <X size={12} className="text-slate-400 hover:text-red-500" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -537,12 +619,15 @@ export default function CompanyCalendar() {
                     <Tag size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <select value={newEvent.type} onChange={(e) => setNewEvent({ ...newEvent, type: e.target.value as EventType })}
                       className="input-field pl-8 appearance-none cursor-pointer">
-                      {(Object.keys(eventTypeConfig) as EventType[]).map((t) => (
+                      {(Object.keys(eventTypeConfig) as EventType[]).filter((t) => !SYSTEM_EVENT_TYPES.includes(t)).map((t) => (
                         <option key={t} value={t}>{eventTypeConfig[t].label}</option>
                       ))}
                     </select>
                     <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                   </div>
+                  {newEvent.type === 'holiday' && (
+                    <p className="text-[10px] text-amber-600 mt-1">Only shows on the calendar. To stop auto-absent &amp; count it as a holiday in attendance/payroll, add it in Holiday Management.</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Priority</label>
