@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { CalendarDays, Settings, RefreshCw, Users, Building2, Plus, X, Save, Loader2 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
+import FirmFilterTabs from '@/components/FirmFilterTabs';
 import { toast, Toaster } from 'sonner';
 import Icon from '@/components/ui/AppIcon';
 
@@ -16,6 +17,7 @@ interface LeaveBalance {
   total_days: number;
   used_days: number;
   carry_forward_days: number;
+  firm_id: string | null;
   user_profiles?: { full_name: string; department: string; role: string };
 }
 
@@ -24,9 +26,15 @@ interface Holiday {
   name: string;
   holiday_date: string;
   holiday_type: string;
+  firm_id: string | null;
 }
 
-interface UserProfile { id: string; full_name: string; department: string; role: string; }
+interface UserProfile { id: string; full_name: string; department: string; role: string; firm_id: string | null; }
+
+interface FirmOption { id: string; name: string; code: string; }
+
+// Used only when the caller can see no firms at all, so every "in (...)" filter stays valid SQL
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 const LEAVE_TYPES = [
   { key: 'substitute', label: 'Substitute Leave', defaultDays: 12 },
@@ -49,6 +57,9 @@ export default function LeaveAdminPanel() {
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const [firmOptions, setFirmOptions] = useState<FirmOption[]>([]);
+  const [myFirmId, setMyFirmId] = useState<string | null>(null);
+  const [firmFilter, setFirmFilter] = useState<'all' | string>('all');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectedFY, setSelectedFY] = useState(getFiscalYear());
@@ -68,32 +79,48 @@ export default function LeaveAdminPanel() {
   const [holidayForm, setHolidayForm] = useState({ name: '', date: '', holiday_type: 'national', is_optional: false });
   const [savingHoliday, setSavingHoliday] = useState(false);
 
-  const departments = Array.from(new Set(users.map(u => u.department).filter(Boolean))).sort();
+  // Employees and holidays in the firm currently selected in the firm tabs ('all' = every visible firm)
+  const firmUsers = firmFilter === 'all' ? users : users.filter(u => u.firm_id === firmFilter);
+  const scopedHolidays = firmFilter === 'all' ? holidays : holidays.filter(h => h.firm_id === firmFilter);
+  const departments = Array.from(new Set(firmUsers.map(u => u.department).filter(Boolean))).sort();
+
+  const firmNameById = (id: string | null | undefined) => firmOptions.find(f => f.id === id)?.name ?? '—';
+  const firmNameOfUser = (uid: string) => firmNameById(users.find(u => u.id === uid)?.firm_id);
 
   const fetchData = useCallback(async () => {
     if (!effectiveUserId) return;
     setLoading(true);
     try {
-      const { data: visibleFirmIds } = await supabase.rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' });
+      // Own firm, plus every firm whose LEAVE data is shared with us
+      // (or that we see as a holding-firm director). Must use module 'leave':
+      // rules shared for other modules, and the 'all' rule, do not cover leave.
+      const { data: me } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).maybeSingle();
+      const ownFirmId: string | null = me?.firm_id ?? null;
+      setMyFirmId(ownFirmId);
 
-      let usersQuery = supabase.from('user_profiles').select('id, full_name, department, role').order('full_name');
-      let balancesQuery = supabase.from('leave_balances')
-        .select('*, user_profiles(full_name, department, role)')
-        .eq('fiscal_year', selectedFY)
-        .order('leave_type');
-      if (visibleFirmIds) {
-        usersQuery = usersQuery.in('firm_id', visibleFirmIds);
-        balancesQuery = balancesQuery.in('firm_id', visibleFirmIds);
-      }
+      const { data: sharedIds, error: firmErr } = await supabase.rpc('get_visible_firm_ids', {
+        p_user_id: effectiveUserId,
+        p_module: 'leave',
+      });
+      const firmIds: string[] = !firmErr && sharedIds?.length
+        ? (sharedIds as string[])
+        : (ownFirmId ? [ownFirmId] : []);
+      const scopeIds = firmIds.length ? firmIds : [NIL_UUID];
 
-      const [usersRes, balancesRes, holidaysRes, settingsRes] = await Promise.all([
-        usersQuery,
-        balancesQuery,
-        supabase.from('company_holidays').select('*').order('holiday_date'),
+      const [firmsRes, usersRes, balancesRes, holidaysRes, settingsRes] = await Promise.all([
+        supabase.from('firms').select('id, name, code').in('id', scopeIds).order('name'),
+        supabase.from('user_profiles').select('id, full_name, department, role, firm_id').in('firm_id', scopeIds).order('full_name'),
+        supabase.from('leave_balances')
+          .select('*, user_profiles(full_name, department, role)')
+          .eq('fiscal_year', selectedFY)
+          .in('firm_id', scopeIds)
+          .order('leave_type'),
+        supabase.from('company_holidays').select('*').in('firm_id', scopeIds).order('holiday_date'),
         supabase.from('director_settings').select('setting_key, setting_value'),
       ]);
 
-      if (usersRes.data) setUsers(usersRes.data);
+      if (firmsRes.data) setFirmOptions(firmsRes.data as FirmOption[]);
+      if (usersRes.data) setUsers(usersRes.data as UserProfile[]);
       if (balancesRes.data) setBalances(balancesRes.data as LeaveBalance[]);
       if (holidaysRes.data) setHolidays(holidaysRes.data as Holiday[]);
 
@@ -174,10 +201,10 @@ export default function LeaveAdminPanel() {
   const handleRecalculateBalances = async (scope: 'all' | 'dept' | 'user') => {
     setSaving(true);
     try {
-      // Fetch all users in scope
-      let targetUsers = users;
-      if (scope === 'dept' && deptFilter !== 'all') targetUsers = users.filter(u => u.department === deptFilter);
-      if (scope === 'user' && userFilter !== 'all') targetUsers = users.filter(u => u.id === userFilter);
+      // Fetch all users in scope (within the selected firm tab)
+      let targetUsers = firmUsers;
+      if (scope === 'dept' && deptFilter !== 'all') targetUsers = firmUsers.filter(u => u.department === deptFilter);
+      if (scope === 'user' && userFilter !== 'all') targetUsers = firmUsers.filter(u => u.id === userFilter);
 
       let upserted = 0;
       for (const u of targetUsers) {
@@ -187,14 +214,16 @@ export default function LeaveAdminPanel() {
           const usedDays = existing?.used_days ?? 0;
           const cfDays = carryForwardEnabled ? Math.min(existing?.carry_forward_days ?? 0, carryForwardMax) : 0;
 
-          await supabase.from('leave_balances').upsert({
+          const { error } = await supabase.from('leave_balances').upsert({
             user_id: u.id,
+            firm_id: u.firm_id ?? myFirmId, // keeps the row visible to firm-scoped queries
             leave_type: lt.key,
             fiscal_year: selectedFY,
             total_days: quota + cfDays,
             used_days: usedDays,
             carry_forward_days: cfDays,
           }, { onConflict: 'user_id,leave_type,fiscal_year' });
+          if (error) throw error;
           upserted++;
         }
       }
@@ -209,12 +238,16 @@ export default function LeaveAdminPanel() {
 
   const handleAddHoliday = async () => {
     if (!holidayForm.name.trim() || !holidayForm.date) { toast.error('Name and date are required'); return; }
+    // Holiday goes to the firm tab you have selected, or to your own firm when the tab is "All"
+    const targetFirm = firmFilter !== 'all' ? firmFilter : myFirmId;
+    if (!targetFirm) { toast.error('Could not determine which firm this holiday belongs to'); return; }
     setSavingHoliday(true);
     try {
       const { error } = await supabase.from('company_holidays').insert({
         name: holidayForm.name,
         holiday_date: holidayForm.date,
         holiday_type: holidayForm.holiday_type,
+        firm_id: targetFirm,
       });
       if (error) throw error;
       toast.success('Holiday added');
@@ -240,6 +273,7 @@ export default function LeaveAdminPanel() {
   };
 
   const filteredBalances = balances.filter(b => {
+    if (firmFilter !== 'all' && b.firm_id !== firmFilter) return false;
     if (deptFilter !== 'all' && (b.user_profiles as any)?.department !== deptFilter) return false;
     if (userFilter !== 'all' && b.user_id !== userFilter) return false;
     return true;
@@ -298,6 +332,13 @@ export default function LeaveAdminPanel() {
         })}
       </div>
 
+      {/* Firm filter: shows only when you can see more than one firm (own + shared) */}
+      {firmOptions.length > 1 && (
+        <div className="mb-4">
+          <FirmFilterTabs firms={firmOptions} selectedFirmId={firmFilter} onSelect={(id) => { setFirmFilter(id); setDeptFilter('all'); setUserFilter('all'); }} />
+        </div>
+      )}
+
       {/* Leave Balances Tab */}
       {activeTab === 'balances' && (
         <div>
@@ -317,7 +358,7 @@ export default function LeaveAdminPanel() {
                 <select value={userFilter} onChange={e => setUserFilter(e.target.value)}
                   className="text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-2 outline-none focus:ring-2 focus:ring-amber-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200">
                   <option value="all">All Employees</option>
-                  {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                  {firmUsers.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
                 </select>
               </div>
               <div className="flex gap-2 ml-auto flex-wrap">
@@ -352,6 +393,7 @@ export default function LeaveAdminPanel() {
               {Object.entries(balancesByUser).map(([uid, entry]) => {
                 const user = (entry as { user: any; balances: LeaveBalance[] }).user;
                 const ubs = (entry as { user: any; balances: LeaveBalance[] }).balances;
+                const firmName = firmNameOfUser(uid);
                 return (
                 <div key={uid} className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
                   <div className="flex items-center gap-3 px-4 py-3 bg-slate-50 dark:bg-slate-700/50 border-b border-slate-100 dark:border-slate-700">
@@ -360,7 +402,9 @@ export default function LeaveAdminPanel() {
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{user?.full_name || 'Unknown'}</p>
-                      <p className="text-xs text-slate-500">{user?.department || '—'} · {user?.role || '—'}</p>
+                      <p className="text-xs text-slate-500">
+                        {user?.department || '—'} · {user?.role || '—'}{firmFilter === 'all' && firmName !== '—' ? ` · ${firmName}` : ''}
+                      </p>
                     </div>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-0 divide-x divide-y divide-slate-100 dark:divide-slate-700">
@@ -394,7 +438,7 @@ export default function LeaveAdminPanel() {
       {activeTab === 'holidays' && (
         <div>
           <div className="flex items-center justify-between mb-4">
-            <p className="text-sm text-slate-500 dark:text-slate-400">{holidays.length} holidays configured</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400">{scopedHolidays.length} holidays configured</p>
             <button onClick={() => setShowHolidayForm(true)}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold transition-colors">
               <Plus size={14} /> Add Holiday
@@ -444,7 +488,7 @@ export default function LeaveAdminPanel() {
           )}
 
           <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
-            {holidays.length === 0 ? (
+            {scopedHolidays.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-slate-400">
                 <CalendarDays size={40} className="mb-3 opacity-30" />
                 <p className="text-sm font-semibold">No holidays configured</p>
@@ -453,23 +497,24 @@ export default function LeaveAdminPanel() {
             ) : (
               <table className="w-full text-xs">
                 <thead><tr className="bg-slate-50 dark:bg-slate-700/50">
-                  {['Date', 'Holiday Name', 'Type', 'Optional', 'Actions'].map(h => (
+                  {['Date', 'Holiday Name', 'Firm', 'Type', 'Optional', 'Actions'].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 font-semibold text-slate-600 dark:text-slate-400 whitespace-nowrap">{h}</th>
                   ))}
                 </tr></thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {holidays.map(h => (
+                  {scopedHolidays.map(h => (
                     <tr key={h.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
                       <td className="px-4 py-2.5 font-mono text-slate-600 dark:text-slate-400 whitespace-nowrap">
                         {new Date(h.holiday_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
                       </td>
                       <td className="px-4 py-2.5 font-semibold text-slate-900 dark:text-slate-100">{h.name}</td>
+                      <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">{firmNameById(h.firm_id)}</td>
                       <td className="px-4 py-2.5 whitespace-nowrap">
                         <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${h.holiday_type === 'national' ? 'bg-blue-100 text-blue-700' : h.holiday_type === 'company' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}`}>
                           {h.holiday_type}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-slate-500">{h.is_optional ? 'Yes' : 'No'}</td>
+                      <td className="px-4 py-2.5 text-slate-500">{(h as any).is_optional ? 'Yes' : 'No'}</td>
                       <td className="px-4 py-2.5">
                         <button onClick={() => handleDeleteHoliday(h.id)} className="text-red-400 hover:text-red-600 transition-colors">
                           <X size={14} />
