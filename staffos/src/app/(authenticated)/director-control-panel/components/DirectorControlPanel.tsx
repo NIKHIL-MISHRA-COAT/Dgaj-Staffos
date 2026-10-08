@@ -50,6 +50,19 @@ function getInitials(name: string): string {
   return name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2);
 }
 
+const MY_STATUS_LABELS: Record<string, string> = {
+  present: 'Present',
+  work_from_home: 'Work from home',
+  late: 'Late',
+  half_day: 'Half day',
+  absent: 'Absent',
+  paid_leave: 'Paid leave',
+  unpaid_leave: 'Unpaid leave',
+};
+
+const fmtTime = (iso: string | null) =>
+  iso ? new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—';
+
 export default function DirectorControlPanel() {
   const { user, pinSession, effectiveUserId } = useAuth();
   const supabase = createClient();
@@ -61,6 +74,13 @@ export default function DirectorControlPanel() {
   const [statusFilter, setStatusFilter] = useState<'all' | Employee['status']>('all');
   const [loading, setLoading] = useState(true);
   const [sendingAnnouncement, setSendingAnnouncement] = useState(false);
+  const [myToday, setMyToday] = useState<{
+    status: string;
+    clock_in: string | null;
+    clock_out: string | null;
+    total_hours: number | null;
+  } | null>(null);
+  const [myTodayLoading, setMyTodayLoading] = useState(true);
   const { t } = useLanguage();
 
   const statusConfig = {
@@ -73,6 +93,7 @@ export default function DirectorControlPanel() {
   useEffect(() => {
     if (!effectiveUserId) return;
     fetchDirectorName();
+    fetchMyToday();
     fetchEmployees();
     fetchPendingApprovals();
   }, [effectiveUserId]);
@@ -81,6 +102,23 @@ export default function DirectorControlPanel() {
     if (!effectiveUserId) return;
     const { data } = await supabase.from('user_profiles').select('full_name').eq('id', effectiveUserId).single();
     if (data?.full_name) setDirectorName(data.full_name);
+  };
+
+  const fetchMyToday = async () => {
+    if (!effectiveUserId) return;
+    setMyTodayLoading(true);
+    // Use the local date (IST), not toISOString(), which is UTC and can show yesterday before 5:30 AM
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const { data, error } = await supabase
+      .from('attendance_records')
+      .select('status, clock_in, clock_out, total_hours')
+      .eq('user_id', effectiveUserId)
+      .eq('work_date', today)
+      .maybeSingle();
+    if (error) console.error('My attendance fetch error:', error);
+    setMyToday(data ?? null);
+    setMyTodayLoading(false);
   };
 
   const fetchEmployees = async () => {
@@ -348,6 +386,44 @@ export default function DirectorControlPanel() {
           </div>
         </div>
       )}
+
+      {/* My Attendance Today */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-card p-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 flex items-center justify-center">
+            <Clock size={18} className="text-emerald-600" />
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">My attendance today</p>
+            <p className="text-base font-600 text-slate-900 dark:text-slate-100">
+              {myTodayLoading
+                ? 'Loading…'
+                : myToday
+                  ? (MY_STATUS_LABELS[myToday.status] ?? myToday.status)
+                  : 'Not clocked in'}
+            </p>
+          </div>
+        </div>
+
+        {!myTodayLoading && myToday && (
+          <div className="flex gap-6 text-sm">
+            <div>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Clock in</p>
+              <p className="font-600 text-slate-800 dark:text-slate-200 tabular-nums">{fmtTime(myToday.clock_in)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Clock out</p>
+              <p className="font-600 text-slate-800 dark:text-slate-200 tabular-nums">{fmtTime(myToday.clock_out)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-400 dark:text-slate-500">Hours</p>
+              <p className="font-600 text-slate-800 dark:text-slate-200 tabular-nums">
+                {myToday.total_hours != null ? myToday.total_hours.toFixed(2) : '—'}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* KPI Overview */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
