@@ -6,6 +6,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { Settings, Shield, Calendar, Clock, Briefcase, ChevronDown, ChevronUp, Save, Plus, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Toaster } from 'sonner';
+import { rolloverLeave, getFiscalYear } from '@/lib/leaveRollover';
 
 interface LeaveQuota {
   role: string;
@@ -89,7 +90,9 @@ const defaultFinancialYear: FinancialYearConfig = {
   current_fy_end: '2027-03-31',
 };
 
-const sectionIds = ['leave', 'financial_year', 'working_hours', 'holidays', 'tasks', 'overtime', 'shifts'] as const;
+const sectionIds = ['leave', 'leave_rollover', 'financial_year', 'working_hours', 'holidays', 'tasks', 'overtime', 'shifts'] as const;
+
+const ROLLOVER_REMINDER_TITLE = '⚠️ Year-end leave rollover — open Director Settings and click Start leave rollover';
 type SectionId = typeof sectionIds[number];
 
 export default function DirectorSettings() {
@@ -158,6 +161,86 @@ export default function DirectorSettings() {
     }
   };
 
+  // Adds one yearly, urgent calendar event on the next 31 March so the director
+  // remembers to run the leave rollover. Created once per director.
+  const ensureRolloverReminder = async () => {
+    if (!effectiveUserId) return;
+    const { data: existing } = await supabase
+      .from('calendar_events')
+      .select('id')
+      .eq('created_by', effectiveUserId)
+      .eq('title', ROLLOVER_REMINDER_TITLE)
+      .eq('recurring', 'yearly')
+      .limit(1);
+    if (existing && existing.length > 0) return;
+
+    const { data: me } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).maybeSingle();
+    const now = new Date();
+    const closeThisYear = new Date(now.getFullYear(), 2, 31, 23, 59);
+    const year = now > closeThisYear ? now.getFullYear() + 1 : now.getFullYear();
+
+    const { error } = await supabase.from('calendar_events').insert({
+      title: ROLLOVER_REMINDER_TITLE,
+      description: 'Financial year closes today. Open Director Settings → Leave Rollover and click "Start leave rollover" to carry unused leave into the next year.',
+      event_date: `${year}-03-31`,
+      firm_id: me?.firm_id ?? null,
+      start_time: null,
+      end_time: null,
+      event_type: 'task',
+      recurring: 'yearly',
+      department: 'All',
+      priority: 'urgent',
+      director_only: true,
+      created_by: effectiveUserId,
+    });
+    if (error) console.warn('Could not create leave rollover reminder:', error.message);
+  };
+
+  useEffect(() => {
+    if (effectiveUserId) ensureRolloverReminder();
+  }, [effectiveUserId]);
+
+  const [rollingOver, setRollingOver] = useState(false);
+
+  const handleLeaveRollover = async () => {
+    if (!effectiveUserId) return;
+    const fromFY = getFiscalYear();
+    const toFY = fromFY + 1;
+    const ok = window.confirm(
+      `Carry all unused leave from FY ${fromFY}-${fromFY + 1} into FY ${toFY}-${toFY + 1} for every employee?\n\n` +
+      `There is no cap and no expiry. Run it after the year closes so the figures are final. ` +
+      `Running it again only recalculates; nothing is counted twice.`
+    );
+    if (!ok) return;
+
+    setRollingOver(true);
+    try {
+      // Same scope as Leave Admin: firms this director can see for leave, else own firm.
+      const { data: visibleIds, error: firmErr } = await supabase.rpc('get_visible_firm_ids', {
+        p_user_id: effectiveUserId,
+        p_module: 'leave',
+      });
+      let firmIds: string[] = !firmErr && visibleIds?.length ? (visibleIds as string[]) : [];
+      if (firmIds.length === 0) {
+        const { data: me } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).maybeSingle();
+        if (me?.firm_id) firmIds = [me.firm_id as string];
+      }
+
+      const res = await rolloverLeave(supabase, { fromFY, toFY, firmIds });
+      if (res.rowsWritten === 0) {
+        toast.info(`No FY ${fromFY}-${fromFY + 1} balances found to carry forward`);
+      } else {
+        toast.success(
+          `Leave rolled over for ${res.employeesAffected} employees — ${res.daysCarried} days carried into FY ${toFY}-${toFY + 1}`
+        );
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Leave rollover failed');
+    } finally {
+      setRollingOver(false);
+    }
+  };
+
   const handleSave = async (section: SectionId) => {
     setSaving(section);
     try {
@@ -212,6 +295,7 @@ export default function DirectorSettings() {
 
   const sections: { id: SectionId; label: string; icon: React.ElementType; desc: string }[] = [
     { id: 'leave',          label: 'Leave Quotas (per FY)',    icon: Calendar, desc: 'Annual leave days per role per financial year' },
+    { id: 'leave_rollover', label: 'Leave Rollover (year-end)', icon: Calendar, desc: 'Carry unused leave into the next financial year — no cap, no expiry' },
     { id: 'financial_year', label: 'Financial Year',           icon: Calendar, desc: 'Set the financial year start/end dates' },
     { id: 'working_hours',  label: 'Working Hours',            icon: Clock,    desc: 'Standard working hours, breaks & overtime thresholds' },
     { id: 'holidays',       label: 'Public Holidays (legacy)', icon: Calendar, desc: 'Quick holiday list — use Holiday Management page for full control' },
@@ -564,6 +648,32 @@ export default function DirectorSettings() {
                           className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
                         >
                           <Save size={14} /> Save Overtime Thresholds
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Leave Rollover */}
+                  {sec.id === 'leave_rollover' && (
+                    <div className="space-y-4">
+                      <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 text-sm text-slate-700">
+                        <p className="font-semibold text-slate-800">
+                          Carry FY {getFiscalYear()}-{getFiscalYear() + 1} unused leave into FY {getFiscalYear() + 1}-{getFiscalYear() + 2}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-1">
+                          Each employee&apos;s remaining days (total − used) move into the next year on top of their entitlement.
+                          No cap and no expiry. Run after the year closes (after 31 March) so the figures are final.
+                          Running it again only recalculates, so nothing is counted twice.
+                        </p>
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          onClick={handleLeaveRollover}
+                          disabled={rollingOver}
+                          className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                        >
+                          {rollingOver ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                          {rollingOver ? 'Rolling over…' : 'Start leave rollover'}
                         </button>
                       </div>
                     </div>

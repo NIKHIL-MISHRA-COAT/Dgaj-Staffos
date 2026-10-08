@@ -34,6 +34,7 @@ interface CalendarEvent {
   reminder_minutes?: number;
   priority?: PriorityType;
   created_by?: string;
+  director_only?: boolean;
 }
 
 const eventTypeConfig: Record<EventType, { label: string; color: string; bg: string; dot: string }> = {
@@ -93,6 +94,8 @@ export default function CompanyCalendar() {
   const [profileRole, setProfileRole] = useState<string | null>(null);
   // Weekly holidays are a director-only feature.
   const isDirector = profileRole === 'director' || pinSession?.role === 'director';
+  // Director-only events (e.g. the year-end leave rollover reminder) are hidden from everyone else.
+  const visibleEvents = isDirector ? events : events.filter((e) => !e.director_only);
 
   useEffect(() => {
     if (!effectiveUserId) return;
@@ -324,7 +327,7 @@ export default function CompanyCalendar() {
     const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     const dayOfWeek = new Date(currentYear, currentMonth, day).getDay();
 
-    return events.filter((e) => {
+    return visibleEvents.filter((e) => {
       const eDate = new Date(e.event_date);
       const eDay = eDate.getUTCDate();
       const eMonth = eDate.getUTCMonth();
@@ -518,7 +521,7 @@ export default function CompanyCalendar() {
                   <div key={type} className="flex items-center gap-2">
                     <span className={`w-2.5 h-2.5 rounded-full ${cfg.dot}`} />
                     <span className="text-xs text-slate-600 dark:text-slate-400">{cfg.label}</span>
-                    <span className="ml-auto text-[10px] text-slate-400 dark:text-slate-500">{events.filter((e) => e.event_type === type).length} events</span>
+                    <span className="ml-auto text-[10px] text-slate-400 dark:text-slate-500">{visibleEvents.filter((e) => e.event_type === type).length} events</span>
                   </div>
                 );
               })}

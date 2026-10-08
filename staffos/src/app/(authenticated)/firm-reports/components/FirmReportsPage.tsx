@@ -1,7 +1,7 @@
 'use client';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, createContext, useContext } from 'react';
 import {
   Building2, TrendingUp, Users, CheckSquare, Calendar, Clock, Layers, RefreshCw, Download, Printer, Wallet, Receipt, CalendarDays,
 } from 'lucide-react';
@@ -182,7 +182,12 @@ function Empty({ text }: { text: string }) {
   return <div className="flex h-full min-h-[120px] items-center justify-center text-sm text-slate-400">{text}</div>;
 }
 
+// True only in compare mode. Without it, KPI cards show no comparison arrows.
+const CompareContext = createContext(false);
+
 function Delta({ value, suffix = '', goodWhenUp = true, neutral = false }: { value: number; suffix?: string; goodWhenUp?: boolean; neutral?: boolean }) {
+  const comparing = useContext(CompareContext);
+  if (!comparing) return null;
   if (!isFinite(value) || Math.abs(value) < 0.5) return <span className="text-[11px] text-slate-400">No change vs previous</span>;
   const up = value > 0;
   const tone = neutral ? 'text-slate-500' : up === goodWhenUp ? 'text-teal-600' : 'text-rose-600';
@@ -276,6 +281,11 @@ export default function FirmReportsPage() {
   const [sortKey, setSortKey] = useState<'name' | 'employees' | 'tasks' | 'att' | 'leave'>('name');
   const [sortDir, setSortDir] = useState<1 | -1>(1);
   const [showAllStaff, setShowAllStaff] = useState(false);
+  // Report date: '' means today. Compare mode uses the from/to dates instead of the period tabs.
+  const [anchorDate, setAnchorDate] = useState('');
+  const [compareOn, setCompareOn] = useState(false);
+  const [compareFrom, setCompareFrom] = useState('');
+  const [compareTo, setCompareTo] = useState('');
 
   useEffect(() => {
     if (!effectiveUserId) return;
@@ -302,12 +312,31 @@ export default function FirmReportsPage() {
   const report = useMemo(() => {
     const { firms, tasks, attendance, leaves, employees, todayNum } = src;
     const now = dateOfNum(todayNum);
-    const startNum =
-      period === 'daily' ? todayNum : period === 'weekly' ? todayNum - 6 : Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 86400000;
-    const len = todayNum - startNum + 1;
+    // Report range. Default opens on today. Daily = the chosen day, weekly = 7 days ending on it,
+    // monthly = the calendar month containing it (up to today).
+    // Compare mode: the picked from→to range, compared with the same number of days before it.
+    let startNum: number;
+    let endNum: number;
+    if (compareOn && compareFrom && compareTo) {
+      startNum = numOfYmd(compareFrom);
+      endNum = Math.min(numOfYmd(compareTo), todayNum);
+    } else {
+      const anchor = Math.min(anchorDate ? numOfYmd(anchorDate) : todayNum, todayNum);
+      const a = dateOfNum(anchor);
+      if (period === 'daily') {
+        startNum = anchor; endNum = anchor;
+      } else if (period === 'weekly') {
+        startNum = anchor - 6; endNum = anchor;
+      } else {
+        startNum = Date.UTC(a.getUTCFullYear(), a.getUTCMonth(), 1) / 86400000;
+        endNum = Math.min(Date.UTC(a.getUTCFullYear(), a.getUTCMonth() + 1, 0) / 86400000, todayNum);
+      }
+    }
+    const len = Math.max(1, endNum - startNum + 1);
     const prevStart = startNum - len;
-    const inCur = (d: number) => d >= startNum && d <= todayNum;
-    const inPrev = (d: number) => d >= prevStart && d < startNum;
+    const prevEnd = startNum - 1;
+    const inCur = (d: number) => d >= startNum && d <= endNum;
+    const inPrev = (d: number) => d >= prevStart && d <= prevEnd;
     const pass = (f: string) => selectedFirmId === 'all' || f === selectedFirmId;
 
     const agg = (range: (d: number) => boolean, firmPass: (f: string) => boolean) => {
@@ -436,9 +465,15 @@ export default function FirmReportsPage() {
     return {
       cur, prev, empF, firmRows, combined, attMix, taskMix, roleMix, trend, attKeys, heat, wk, len,
       payMonths, payLatest, payPrev, payStatus, payByFirm, expM, staff, holidaysNext,
-      rangeLabel: len === 1 ? 'Today' : `${fmtNum(startNum)} to ${fmtNum(todayNum)}`,
+      rangeLabel: compareOn
+        ? `${fmtNum(startNum)} to ${fmtNum(endNum)}, compared with the ${len} days before`
+        : startNum === todayNum && endNum === todayNum
+          ? 'Today'
+          : startNum === endNum
+            ? fmtNum(startNum)
+            : `${fmtNum(startNum)} to ${fmtNum(endNum)}`,
     };
-  }, [src, period, selectedFirmId]);
+  }, [src, period, selectedFirmId, anchorDate, compareOn, compareFrom, compareTo]);
 
   const sortedFirmRows = useMemo(() => {
     const val = (r: (typeof report.firmRows)[number]): any =>
@@ -473,6 +508,9 @@ export default function FirmReportsPage() {
   }
 
   const { cur, prev } = report;
+  // Date limits: the page only loads the last WINDOW days, so older dates can't be shown.
+  const todayYmd = dateOfNum(src.todayNum).toISOString().slice(0, 10);
+  const minYmd = dateOfNum(src.todayNum - (WINDOW - 1)).toISOString().slice(0, 10);
   const attRate = pct(cur.attPresent, cur.attTotal);
   const attRatePrev = pct(prev.attPresent, prev.attTotal);
   const taskRate = pct(cur.tasksDone, cur.tasksTotal);
@@ -483,6 +521,7 @@ export default function FirmReportsPage() {
   const firmBars = report.firmRows.map((r) => ({ id: r.id, name: r.name, Attendance: r.attRate, 'Task completion': r.taskRate, Employees: r.employees }));
 
   return (
+    <CompareContext.Provider value={compareOn}>
     <div className="max-w-screen-xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
       {/* header */}
       <div className="flex items-start justify-between gap-3 mb-5 flex-wrap">
@@ -497,12 +536,38 @@ export default function FirmReportsPage() {
         <div className="flex items-center gap-2 flex-wrap print:hidden">
           <div className="flex rounded-xl border border-slate-200 dark:border-slate-600 overflow-hidden text-xs font-semibold" role="group" aria-label="Period">
             {(['daily', 'weekly', 'monthly'] as Period[]).map((p) => (
-              <button key={p} onClick={() => setPeriod(p)} aria-pressed={period === p}
-                className={`px-3.5 py-2 capitalize ${period === p ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>
+              <button key={p} onClick={() => setPeriod(p)} aria-pressed={period === p} disabled={compareOn}
+                className={`px-3.5 py-2 capitalize disabled:opacity-50 ${period === p ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>
                 {p}
               </button>
             ))}
           </div>
+          <input type="date" aria-label={compareOn ? 'From date' : 'Report date'}
+            value={compareOn ? compareFrom : (anchorDate || todayYmd)}
+            min={minYmd} max={todayYmd}
+            onChange={(e) => (compareOn ? setCompareFrom(e.target.value) : setAnchorDate(e.target.value === todayYmd ? '' : e.target.value))}
+            className="border border-slate-200 dark:border-slate-600 rounded-xl px-2.5 py-1.5 text-xs bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200" />
+          {compareOn && (
+            <input type="date" aria-label="To date" value={compareTo}
+              min={compareFrom || minYmd} max={todayYmd}
+              onChange={(e) => setCompareTo(e.target.value)}
+              className="border border-slate-200 dark:border-slate-600 rounded-xl px-2.5 py-1.5 text-xs bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200" />
+          )}
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer">
+            <input type="checkbox" checked={compareOn}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setCompareOn(on);
+                if (on) {
+                  if (!compareFrom) setCompareFrom(dateOfNum(src.todayNum - 6).toISOString().slice(0, 10));
+                  if (!compareTo) setCompareTo(todayYmd);
+                }
+              }} />
+            Compare dates
+          </label>
+          {compareOn && compareFrom && compareTo && compareFrom > compareTo && (
+            <span className="text-xs text-rose-600">From date must be before To date</span>
+          )}
           <button onClick={loadReport} disabled={loading} aria-label="Refresh" className="rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 p-2 text-slate-600 dark:text-slate-300 disabled:opacity-50">
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           </button>
@@ -941,5 +1006,6 @@ export default function FirmReportsPage() {
         </div>
       )}
     </div>
+    </CompareContext.Provider>
   );
 }
