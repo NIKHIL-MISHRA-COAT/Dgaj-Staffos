@@ -11,7 +11,7 @@ type EventType = 'meeting' | 'task' | 'reminder' | 'holiday' | 'review' | 'payro
 
 // Generated from attendance / leave data — shown on the calendar but not user-creatable
 const SYSTEM_EVENT_TYPES: EventType[] = ['present', 'absent', 'leave'];
-const isSyntheticEvent = (id: string) => /^(task|holiday|leave|salary|att)-/.test(id);
+const isSyntheticEvent = (id: string) => /^(task|rti|holiday|leave|salary|att)-/.test(id);
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 // Local date string. toISOString() shifts to the previous day in IST and drops the month's last day.
@@ -130,7 +130,7 @@ export default function CompanyCalendar() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'company_holidays' }, () => {
         scheduleRefresh();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance_records' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recurring_task_instances' }, () => {
         scheduleRefresh();
       })
       .subscribe();
@@ -177,6 +177,33 @@ export default function CompanyCalendar() {
           recurring: (t.recurring as RecurringType) || 'none',
           description: `${t.status === 'done' ? '✅ Completed' : t.status === 'overdue' ? '⚠️ Overdue' : `Task · ${t.task_category || 'general'}`}`,
           priority: (t.priority === 'critical' ? 'urgent' : t.priority) as PriorityType,
+          created_by: uid,
+        }));
+      }
+
+      // This user's recurring-task occurrences for the month: one entry per due date.
+      // Cancelled occurrences are hidden. Shown alongside normal tasks.
+      let recurringEvents: CalendarEvent[] = [];
+      if (uid) {
+        const { data: instances } = await supabase
+          .from('recurring_task_instances')
+          .select('id, task_name, due_date, due_time, status, priority, frequency, is_overdue')
+          .eq('assigned_to', uid)
+          .neq('status', 'cancelled')
+          .gte('due_date', monthStart)
+          .lte('due_date', monthEnd);
+
+        recurringEvents = (instances || []).map((i: any) => ({
+          id: `rti-${i.id}`,
+          title: `🔁 ${i.task_name}`,
+          event_date: String(i.due_date).slice(0, 10),
+          start_time: i.due_time || undefined,
+          event_type: 'task' as EventType,
+          recurring: 'none' as RecurringType,
+          description: i.status === 'completed' ? '✅ Completed'
+            : (i.is_overdue || i.status === 'overdue') ? '⚠️ Overdue'
+            : `Recurring · ${i.frequency || 'task'}`,
+          priority: (i.priority === 'critical' ? 'urgent' : i.priority) as PriorityType,
           created_by: uid,
         }));
       }
@@ -234,69 +261,6 @@ export default function CompanyCalendar() {
         });
       }
 
-      // This user's attendance for the month: Present / Absent markers.
-      // Holiday and leave days never get an Absent marker, even if an
-      // auto-generated absent row exists for them.
-      const holidayDates = new Set<string>((holidays || []).map((h: any) => String(h.holiday_date).slice(0, 10)));
-      let attendanceEvents: CalendarEvent[] = [];
-      if (uid) {
-        const { data: att } = await supabase
-          .from('attendance_records')
-          .select('id, work_date, status, clock_in, clock_out')
-          .eq('user_id', uid)
-          .gte('work_date', monthStart)
-          .lte('work_date', monthEnd);
-
-        const hhmm = (ts: string | null) => ts ? new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
-        (att || []).forEach((a: any) => {
-          const dateStr = String(a.work_date).slice(0, 10);
-          const worked = ['present', 'late', 'half_day', 'work_from_home'].includes(a.status) || !!a.clock_in;
-          if (worked && a.status !== 'absent') {
-            const label = a.status === 'late' ? 'Late' : a.status === 'half_day' ? 'Half Day' : a.status === 'work_from_home' ? 'WFH' : 'Present';
-            attendanceEvents.push({
-              id: `att-${a.id}`,
-              title: `✅ ${label}`,
-              event_date: dateStr,
-              event_type: 'present' as EventType,
-              recurring: 'none' as RecurringType,
-              description: a.clock_in ? `${hhmm(a.clock_in)}${a.clock_out ? ` – ${hhmm(a.clock_out)}` : ''}` : undefined,
-              created_by: uid,
-            });
-          } else if (a.status === 'absent') {
-            if (holidayDates.has(dateStr) || leaveDates.has(dateStr)) return; // holiday / leave wins over auto-absent
-            attendanceEvents.push({
-              id: `att-${a.id}`,
-              title: '❌ Absent',
-              event_date: dateStr,
-              event_type: 'absent' as EventType,
-              recurring: 'none' as RecurringType,
-              created_by: uid,
-            });
-          }
-        });
-
-        // Past working days with no present record, no holiday and no APPROVED leave -> Absent
-        // (covers missing rows and leave-status rows that have no approved application)
-        const todayStr = toDateStr(new Date());
-        const workedDates = new Set<string>(attendanceEvents.filter(e => e.event_type === 'present').map(e => e.event_date));
-        const absentDates = new Set<string>(attendanceEvents.filter(e => e.event_type === 'absent').map(e => e.event_date));
-        const lastDay = new Date(currentYear, currentMonth + 1, 0).getDate();
-        for (let d = 1; d <= lastDay; d++) {
-          const ds = `${currentYear}-${pad2(currentMonth + 1)}-${pad2(d)}`;
-          const dow = new Date(currentYear, currentMonth, d).getDay();
-          if (ds >= todayStr || dow === 0 || dow === 6) continue;
-          if (workedDates.has(ds) || absentDates.has(ds) || holidayDates.has(ds) || leaveDates.has(ds)) continue;
-          attendanceEvents.push({
-            id: `att-missing-${ds}`,
-            title: '❌ Absent',
-            event_date: ds,
-            event_type: 'absent' as EventType,
-            recurring: 'none' as RecurringType,
-            created_by: uid,
-          });
-        }
-      }
-
       // Recurring "Salary Day" marker, driven by the Payroll setting in Firm
       // Configuration (director_settings.setting_key = 'salary_schedule').
       // Synthetic — not a real calendar_events row — so it always reflects
@@ -322,7 +286,7 @@ export default function CompanyCalendar() {
         }];
       }
 
-      setEvents([...(calData || []), ...taskEvents, ...holidayEvents, ...leaveEvents, ...attendanceEvents, ...payrollEvents]);
+      setEvents([...(calData || []), ...taskEvents, ...recurringEvents, ...holidayEvents, ...leaveEvents, ...payrollEvents]);
     } catch (err) {
       console.error('Calendar fetch error:', err);
     } finally {
