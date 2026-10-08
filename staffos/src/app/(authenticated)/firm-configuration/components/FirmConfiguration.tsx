@@ -5,6 +5,15 @@ import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { Building2, Clock, Calendar, MapPin, Briefcase, ChevronDown, ChevronUp, Save, Plus, Trash2, AlertTriangle, Loader2, GitBranch, Share2, X, Edit2 } from 'lucide-react';
 import { toast } from 'sonner';
+import {
+  addWeeklyHolidays,
+  listWeeklyHolidays,
+  removeWeeklyHolidays,
+  plusMonthsStr,
+  todayStr,
+  WEEKDAY_NAMES,
+  type WeeklyHolidayRule,
+} from '@/lib/weeklyHolidays';
 import { Toaster } from 'sonner';
 
 interface LeaveQuota {
@@ -114,8 +123,42 @@ const typeColors: Record<Holiday['type'], string> = {
 };
 
 export default function FirmConfiguration() {
-  const { user, effectiveUserId } = useAuth();
+  const { user, effectiveUserId, pinSession } = useAuth();
   const supabase = createClient();
+
+  // Weekly holidays are director-only and are written straight to company_holidays.
+  const [profileRole, setProfileRole] = useState<string | null>(null);
+  const isDirector = profileRole === 'director' || pinSession?.role === 'director';
+  const [weeklyRules, setWeeklyRules] = useState<WeeklyHolidayRule[]>([]);
+  const [weeklySaving, setWeeklySaving] = useState(false);
+  const [newWeekly, setNewWeekly] = useState(() => ({
+    weekday: 0,
+    name: '',
+    from: todayStr(),
+    to: plusMonthsStr(todayStr(), 12),
+  }));
+
+  useEffect(() => {
+    if (!effectiveUserId) return;
+    supabase
+      .from('user_profiles')
+      .select('role')
+      .eq('id', effectiveUserId)
+      .maybeSingle()
+      .then(({ data }) => setProfileRole((data?.role as string) ?? null));
+  }, [effectiveUserId]);
+
+  const loadWeeklyRules = useCallback(async () => {
+    try {
+      setWeeklyRules(await listWeeklyHolidays(supabase));
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to load weekly holidays');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isDirector) loadWeeklyRules();
+  }, [isDirector, loadWeeklyRules]);
 
   const [openSection, setOpenSection] = useState<SectionId>('working_hours');
   const [leaveQuotas, setLeaveQuotas] = useState<LeaveQuota[]>(emptyLeaveQuotas);
@@ -403,6 +446,46 @@ export default function FirmConfiguration() {
     setHolidays((prev) => prev.filter((h) => h.id !== id));
   };
 
+  const handleAddWeekly = async () => {
+    if (!newWeekly.name.trim()) {
+      toast.error('Enter a name for the weekly holiday');
+      return;
+    }
+    if (!newWeekly.from || !newWeekly.to || newWeekly.to < newWeekly.from) {
+      toast.error('Pick a valid from and to date');
+      return;
+    }
+    setWeeklySaving(true);
+    try {
+      const { added, skipped } = await addWeeklyHolidays(supabase, {
+        weekday: newWeekly.weekday,
+        from: newWeekly.from,
+        to: newWeekly.to,
+        name: newWeekly.name.trim(),
+        createdBy: effectiveUserId,
+      });
+      toast.success(
+        `Every ${WEEKDAY_NAMES[newWeekly.weekday]} added — ${added} date${added === 1 ? '' : 's'}${skipped ? `, ${skipped} already marked` : ''}`
+      );
+      setNewWeekly((p) => ({ ...p, name: '' }));
+      await loadWeeklyRules();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to add weekly holiday');
+    } finally {
+      setWeeklySaving(false);
+    }
+  };
+
+  const handleRemoveWeekly = async (weekday: number) => {
+    try {
+      const removed = await removeWeeklyHolidays(supabase, { weekday });
+      toast.success(`Every ${WEEKDAY_NAMES[weekday]} rule removed — ${removed} date${removed === 1 ? '' : 's'} cleared`);
+      await loadWeeklyRules();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to remove weekly holiday');
+    }
+  };
+
   const sections: { id: SectionId; label: string; icon: React.ElementType; desc: string }[] = [
     { id: 'working_hours',  label: 'Working Hours',         icon: Clock,     desc: 'Standard hours, breaks & overtime thresholds' },
     { id: 'leave',          label: 'Leave Quotas (per FY)', icon: Calendar,  desc: 'Annual leave days per role — Substitute, Paid, Unpaid, Medical, Half Day' },
@@ -593,6 +676,59 @@ export default function FirmConfiguration() {
                           </button>
                         </div>
                       </div>
+                      {isDirector && (
+                        <div className="border-t border-slate-100 pt-4 mt-4">
+                          <p className="text-xs font-semibold text-slate-600 mb-1">
+                            Weekly holiday <span className="text-[10px] font-normal text-violet-600">(directors only)</span>
+                          </p>
+                          <p className="text-[11px] text-slate-500 mb-3">
+                            Marks every chosen weekday in the date range as a holiday for attendance and payroll. Saved immediately.
+                          </p>
+
+                          {weeklyRules.length > 0 && (
+                            <div className="space-y-2 mb-3">
+                              {weeklyRules.map((r) => (
+                                <div key={r.weekday} className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg">
+                                  <div className="flex-1">
+                                    <p className="text-sm font-semibold text-slate-800">Every {WEEKDAY_NAMES[r.weekday]} — {r.name}</p>
+                                    <p className="text-xs text-slate-500">
+                                      {r.count} upcoming date{r.count === 1 ? '' : 's'} · until {new Date(r.lastDate + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                    </p>
+                                  </div>
+                                  <button onClick={() => handleRemoveWeekly(r.weekday)}
+                                    aria-label={`Remove every ${WEEKDAY_NAMES[r.weekday]} holiday`}
+                                    className="p-1.5 hover:bg-red-100 rounded-lg transition-colors">
+                                    <Trash2 size={13} className="text-red-500" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="flex gap-2 flex-wrap">
+                            <select value={newWeekly.weekday}
+                              onChange={(e) => setNewWeekly((p) => ({ ...p, weekday: Number(e.target.value) }))}
+                              className="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300">
+                              {WEEKDAY_NAMES.map((n, i) => <option key={n} value={i}>{n}</option>)}
+                            </select>
+                            <input type="text" placeholder="Name (e.g. Weekly Off)" value={newWeekly.name}
+                              onChange={(e) => setNewWeekly((p) => ({ ...p, name: e.target.value }))}
+                              className="flex-1 min-w-[160px] border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+                            <input type="date" value={newWeekly.from} aria-label="From"
+                              onChange={(e) => setNewWeekly((p) => ({ ...p, from: e.target.value }))}
+                              className="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+                            <input type="date" value={newWeekly.to} aria-label="To"
+                              onChange={(e) => setNewWeekly((p) => ({ ...p, to: e.target.value }))}
+                              className="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+                            <button onClick={handleAddWeekly} disabled={weeklySaving}
+                              className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white text-sm font-semibold px-3 py-2 rounded-lg transition-colors">
+                              {weeklySaving ? <Loader2 size={13} className="animate-spin" /> : <Plus size={14} />}
+                              Add weekly
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
                       <div className="flex justify-end mt-4">
                         <button onClick={() => handleSave('holidays')} disabled={saving === 'holidays'}
                           className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">

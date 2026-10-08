@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { Toaster } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
+import { addWeeklyHolidays, plusMonthsStr } from '@/lib/weeklyHolidays';
 
 type EventType = 'meeting' | 'task' | 'reminder' | 'holiday' | 'review' | 'payroll' | 'present' | 'absent' | 'leave';
 
@@ -87,8 +88,21 @@ export default function CompanyCalendar() {
   const [showNewEvent, setShowNewEvent] = useState(false);
   const [newEvent, setNewEvent] = useState<NewEventForm>(defaultForm);
   const [deptFilter, setDeptFilter] = useState('All');
-  const { user, effectiveUserId } = useAuth();
+  const { user, effectiveUserId, pinSession } = useAuth();
   const supabase = createClient();
+  const [profileRole, setProfileRole] = useState<string | null>(null);
+  // Weekly holidays are a director-only feature.
+  const isDirector = profileRole === 'director' || pinSession?.role === 'director';
+
+  useEffect(() => {
+    if (!effectiveUserId) return;
+    supabase
+      .from('user_profiles')
+      .select('role')
+      .eq('id', effectiveUserId)
+      .maybeSingle()
+      .then(({ data }) => setProfileRole((data?.role as string) ?? null));
+  }, [effectiveUserId]);
 
   useEffect(() => {
     const now = new Date();
@@ -338,6 +352,27 @@ export default function CompanyCalendar() {
     try {
       const eventDate = newEvent.date || `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(selectedDate || 1).padStart(2, '0')}`;
       const { data: creatorProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', uid).single();
+
+      // Director + weekly + holiday: write one holiday row per matching weekday for
+      // the next 12 months, so attendance and payroll treat them as holidays.
+      if (isDirector && newEvent.type === 'holiday' && newEvent.recurring === 'weekly') {
+        const weekday = new Date(`${eventDate}T00:00:00`).getDay();
+        const { added, skipped } = await addWeeklyHolidays(supabase, {
+          weekday,
+          from: eventDate,
+          to: plusMonthsStr(eventDate, 12),
+          name: newEvent.title.trim(),
+          createdBy: uid,
+        });
+        await fetchEvents();
+        setNewEvent(defaultForm);
+        setShowNewEvent(false);
+        toast.success(
+          `Weekly holiday added — ${added} date${added === 1 ? '' : 's'} added${skipped ? `, ${skipped} already marked` : ''}`,
+          { duration: 4000 }
+        );
+        return;
+      }
       const payload: Record<string, any> = {
         title: newEvent.title,
         description: newEvent.description,
@@ -589,7 +624,10 @@ export default function CompanyCalendar() {
                     </select>
                     <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                   </div>
-                  {newEvent.type === 'holiday' && (
+                  {newEvent.type === 'holiday' && isDirector && newEvent.recurring === 'weekly' && (
+                    <p className="text-[10px] text-emerald-700 mt-1">Weekly holiday: every matching weekday for the next 12 months is marked as a holiday in attendance and payroll.</p>
+                  )}
+                  {newEvent.type === 'holiday' && !(isDirector && newEvent.recurring === 'weekly') && (
                     <p className="text-[10px] text-amber-600 mt-1">Only shows on the calendar. To stop auto-absent &amp; count it as a holiday in attendance/payroll, add it in Holiday Management.</p>
                   )}
                 </div>
