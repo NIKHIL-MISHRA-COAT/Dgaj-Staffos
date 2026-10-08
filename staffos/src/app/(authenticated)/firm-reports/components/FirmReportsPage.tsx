@@ -40,7 +40,7 @@ const EMPTY: Source = {
 const SCHEMA = {
   payroll: { table: 'payroll_records', emp: 'user_id', firm: 'firm_id', month: 'month', gross: 'gross_salary', present: 'present_days', absent: 'absent_days', perDay: 'deduction_per_day', deducted: 'total_deduction', net: 'net_salary', status: 'status' },
   expenses: { table: 'expenses', emp: 'user_id', firm: 'firm_id', date: 'created_at', category: 'category', amount: 'amount', reimbursed: 'reimbursed_amount', status: 'status' },
-  holidays: { table: 'holidays', date: 'holiday_date', name: 'name' },
+  holidays: { table: 'company_holidays', date: 'holiday_date', name: 'name' },
   staff: { name: 'full_name', attEmp: 'user_id', taskEmp: 'assigned_to' },
 } as const;
 
@@ -82,12 +82,14 @@ async function loadAll(supabase: any): Promise<Source> {
   const sinceDate = ymd(since);
   const sinceIso = since.toISOString();
 
-  const [firmsRes, tasks, attendance, leaves, employees] = await Promise.all([
+  const [firmsRes, tasks, attendance, leaves, employees, leaveSpans] = await Promise.all([
     supabase.from('firms').select('id, name, code').order('name'),
     fetchAll(() => supabase.from('tasks').select('id, firm_id, status, created_at').gte('created_at', sinceIso).order('id')),
-    fetchAll(() => supabase.from('attendance_records').select('id, firm_id, status, work_date').gte('work_date', sinceDate).order('id')),
+    fetchAll(() => supabase.from('attendance_records').select('id, user_id, firm_id, status, work_date').gte('work_date', sinceDate).order('id')),
     fetchAll(() => supabase.from('leave_requests').select('id, firm_id, created_at').gte('created_at', sinceIso).order('id')),
-    fetchAll(() => supabase.from('user_profiles').select('id, firm_id, role').eq('is_active', true).order('id')),
+    fetchAll(() => supabase.from('user_profiles').select('id, firm_id, role, created_at').eq('is_active', true).order('id')),
+    // approved leave that overlaps the window: those days are leave, not absence
+    fetchAll(() => supabase.from('leave_requests').select('user_id, start_date, end_date').eq('status', 'approved').lte('start_date', ymd(today)).gte('end_date', sinceDate).order('id')),
   ]);
   if (firmsRes.error) throw firmsRes.error;
 
@@ -108,6 +110,30 @@ async function loadAll(supabase: any): Promise<Source> {
     opt('staff', () => fetchAll(() => supabase.from('attendance_records').select(`id, ${S.attEmp}, status, work_date`).gte('work_date', sinceDate).order('id'))),
     opt('staff', () => fetchAll(() => supabase.from('tasks').select(`id, ${S.taskEmp}, status, created_at`).gte('created_at', sinceIso).order('id'))),
   ]);
+
+  // Absent = a working day (not Sat/Sun, not a holiday) where an active employee has
+  // no attendance record and no approved leave. Days before the employee's join date are skipped.
+  const holidayDays = new Set<number>(holRows.filter((r: any) => r[H.date]).map((r: any) => numOfYmd(String(r[H.date]))));
+  const attendanceKeys = new Set<string>(attendance.map((r: any) => `${r.user_id}|${numOfYmd(String(r.work_date))}`));
+  const onLeaveKeys = new Set<string>();
+  leaveSpans.forEach((l: any) => {
+    const end = numOfYmd(String(l.end_date));
+    for (let d = numOfYmd(String(l.start_date)); d <= end; d++) onLeaveKeys.add(`${l.user_id}|${d}`);
+  });
+  const absentRows: { user_id: string; firm_id: string | null; work_date: string }[] = [];
+  const lastNum = numOfDate(today);
+  for (let d = numOfDate(since); d <= lastNum; d++) {
+    const dow = dateOfNum(d).getUTCDay();
+    if (dow === 0 || dow === 6 || holidayDays.has(d)) continue;
+    const dateStr = dateOfNum(d).toISOString().slice(0, 10);
+    for (const e of employees) {
+      const joinNum = e.created_at ? numOfDate(new Date(e.created_at)) : 0;
+      if (d < joinNum) continue;
+      const key = `${e.id}|${d}`;
+      if (attendanceKeys.has(key) || onLeaveKeys.has(key)) continue;
+      absentRows.push({ user_id: String(e.id), firm_id: e.firm_id ?? null, work_date: dateStr });
+    }
+  }
 
   const payroll: PayRec[] = payRows.map((r: any) => {
     const emp = String(r[P.emp] ?? '');
@@ -136,13 +162,16 @@ async function loadAll(supabase: any): Promise<Source> {
   return {
     firms: (firmsRes.data as Firm[]) || [],
     tasks: tasks.map((r) => ({ firm: fk(r.firm_id), day: numOfDate(new Date(r.created_at)), status: String(r.status ?? '').toLowerCase() })),
-    attendance: attendance.map((r) => ({ firm: fk(r.firm_id), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
+    attendance: [...attendance, ...absentRows].map((r: any) => ({ firm: fk(r.firm_id), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
     leaves: leaves.map((r) => ({ firm: fk(r.firm_id), day: numOfDate(new Date(r.created_at)), status: '' })),
     employees: employees.map((r) => ({ id: String(r.id), firm: fk(r.firm_id), role: String(r.role ?? 'employee').toLowerCase() })),
     todayNum: numOfDate(today),
     payroll, expenses, names, warn,
     holidays: holRows.filter((r: any) => r[H.date]).map((r: any) => ({ day: numOfYmd(String(r[H.date])), name: r[H.name] ?? 'Holiday' })),
-    staffAtt: sAtt.map((r: any) => ({ emp: String(r[S.attEmp]), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
+    staffAtt: [
+      ...sAtt.map((r: any) => ({ emp: String(r[S.attEmp]), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
+      ...absentRows.map((r) => ({ emp: r.user_id, day: numOfYmd(r.work_date), status: 'absent' })),
+    ],
     staffTasks: sTask.map((r: any) => ({ emp: String(r[S.taskEmp]), day: numOfDate(new Date(r.created_at)), status: String(r.status ?? '').toLowerCase() })),
   };
 }
@@ -382,8 +411,11 @@ export default function FirmReportsPage() {
     // 30 day trends
     const attKeys = [...new Set(attendance.filter((r) => pass(r.firm)).map((r) => r.status || 'unknown'))]
       .sort((a, b) => (PRESENT_LIKE.includes(b) ? 1 : 0) - (PRESENT_LIKE.includes(a) ? 1 : 0) || a.localeCompare(b));
-    const trend = Array.from({ length: 30 }, (_, i) => {
-      const d = todayNum - 29 + i;
+    // Charts follow the selected range: at least 7 days, at most 31, ending on the range's last day.
+    const tStart = Math.max(Math.min(startNum, endNum - 6), endNum - 30);
+    const tLen = endNum - tStart + 1;
+    const trend = Array.from({ length: tLen }, (_, i) => {
+      const d = tStart + i;
       const row: any = { label: fmtNum(d), created: 0, done: 0, leave: 0, rate: 0, exp: 0 };
       attKeys.forEach((k) => { row[k] = 0; });
       let tot = 0; let pres = 0;
@@ -400,7 +432,7 @@ export default function FirmReportsPage() {
     const dowIdx = (n: number) => (dateOfNum(n).getUTCDay() + 6) % 7;
     const heat = firmIds.map((id) => {
       const cells = wk.map((_, w) => {
-        const rs = attendance.filter((r) => r.firm === id && r.day > todayNum - 30 && dowIdx(r.day) === w);
+        const rs = attendance.filter((r) => r.firm === id && r.day >= tStart && r.day <= endNum && dowIdx(r.day) === w);
         return rs.length ? pct(rs.filter((r) => PRESENT_LIKE.includes(r.status)).length, rs.length) : null;
       });
       return { id, name: nameOf(id), cells };
@@ -639,7 +671,7 @@ export default function FirmReportsPage() {
 
           {/* attendance trend + mix */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <Tile className="lg:col-span-8" title="Attendance, last 30 days" hint="Records per day by status">
+            <Tile className="lg:col-span-8" title="Attendance by day" hint={`Records per day by status · ${report.rangeLabel}`}>
               <div className="h-64">
                 {report.attKeys.length === 0 ? <Empty text="No attendance records yet" /> : (
                   <ResponsiveContainer width="100%" height="100%">
@@ -663,7 +695,7 @@ export default function FirmReportsPage() {
 
           {/* tasks trend + mix */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <Tile className="lg:col-span-8" title="Tasks, last 30 days" hint="Created each day and how many of them are done">
+            <Tile className="lg:col-span-8" title="Tasks by day" hint={`Created each day and how many are done · ${report.rangeLabel}`}>
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={report.trend} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
@@ -731,7 +763,7 @@ export default function FirmReportsPage() {
 
           {/* heatmap + leave */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <Tile className="lg:col-span-5" title="Attendance by weekday" hint="Present rate per firm, last 30 days">
+            <Tile className="lg:col-span-5" title="Attendance by weekday" hint={`Present rate per firm · ${report.rangeLabel}`}>
               <div className="overflow-x-auto">
                 <table className="w-full border-separate border-spacing-1 text-[11px] text-slate-400">
                   <thead>
@@ -752,7 +784,7 @@ export default function FirmReportsPage() {
                 </table>
               </div>
             </Tile>
-            <Tile className="lg:col-span-7" title="Leave requests, last 30 days" hint="Requests raised per day">
+            <Tile className="lg:col-span-7" title="Leave requests by day" hint={`Requests raised per day · ${report.rangeLabel}`}>
               <div className="h-52">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={report.trend} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
@@ -835,7 +867,7 @@ export default function FirmReportsPage() {
           {!src.warn.expenses && (
             <>
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-                <Tile className="lg:col-span-8" title="Expenses, last 30 days" hint="Amount claimed per day">
+                <Tile className="lg:col-span-8" title="Expenses by day" hint={`Amount claimed per day · ${report.rangeLabel}`}>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={report.trend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
