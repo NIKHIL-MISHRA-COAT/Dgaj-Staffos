@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
-import { Clock, CheckCircle2, XCircle, ChevronLeft, Loader2, Calendar, Pencil, ChevronDown, ChevronUp, Filter, RefreshCw, Plus, X, Download, User, Users, BarChart2 } from 'lucide-react';
+import { Clock, CheckCircle2, XCircle, ChevronLeft, Loader2, Calendar, Pencil, ChevronDown, ChevronUp, Filter, RefreshCw, Plus, X, Download, User, Users, BarChart2, List, CalendarDays } from 'lucide-react';
 import Link from 'next/link';
 import { toast, Toaster } from 'sonner';
 
@@ -88,6 +88,72 @@ function formatDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+
+// ---------------------------------------------------------------------------
+// Holiday / leave aware status resolution
+//
+// The attendance_records table can hold an auto-generated 'absent' row for a
+// day that is really a company holiday or an approved leave day (for example
+// when the holiday was added after the row was generated). Whatever is stored,
+// we never SHOW such a day as absent:
+//   worked day (present/late/half_day/wfh) ........ always wins
+//   absent row, no clock-in, on a company holiday .. Holiday
+//   absent row, no clock-in, on approved leave ..... Paid / Unpaid Leave
+//   no row at all ................................... Holiday > Leave > Weekend
+// ---------------------------------------------------------------------------
+type LeaveInfo = { status: 'paid_leave' | 'unpaid_leave'; pending: boolean };
+
+// Local-date helpers. Do NOT use toISOString() for date-only strings: in IST
+// (UTC+5:30) local midnight becomes the previous UTC day, which silently cuts
+// the last day off every month.
+const pad2 = (n: number) => String(n).padStart(2, '0');
+function toDateStr(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+function eachDateInRange(start: string, end: string, cb: (dateStr: string) => void) {
+  const [sy, sm, sd] = start.slice(0, 10).split('-').map(Number);
+  const [ey, em, ed] = end.slice(0, 10).split('-').map(Number);
+  const cur = new Date(sy, sm - 1, sd);
+  const last = new Date(ey, em - 1, ed);
+  while (cur <= last) {
+    cb(toDateStr(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+}
+
+// Working hours for a day = regular hours + overtime hours
+const dayHours = (r: { total_hours?: number | null; overtime_hours?: number | null }) =>
+  (Number(r.total_hours) || 0) + (Number(r.overtime_hours) || 0);
+
+function resolveDayStatus(
+  userId: string,
+  dateStr: string,
+  rec: { status: AttendanceStatus; clock_in: string | null } | undefined,
+  holidayMap: Record<string, string>,
+  leaveMap: Record<string, LeaveInfo>,
+): AttendanceStatus | null {
+  // 1. Actually worked -> always keep that status
+  if (rec && (['present', 'late', 'half_day', 'work_from_home'].includes(rec.status) || rec.clock_in)) return rec.status;
+
+  // 2. Company holiday
+  if (holidayMap[dateStr] || rec?.status === 'holiday') return 'holiday';
+
+  // 3. Weekend
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dow = new Date(y, m - 1, d).getDay();
+  if (dow === 0 || dow === 6 || rec?.status === 'weekend') return 'weekend';
+
+  // 4. Leave counts ONLY if an approved leave application exists
+  const leave = leaveMap[`${userId}|${dateStr}`];
+  if (leave && !leave.pending) return leave.status;
+
+  // 5. Working day that has already passed, not present, no holiday, no approved leave -> Absent
+  if (dateStr < toDateStr(new Date())) return 'absent';
+
+  // Today / future: nothing to mark yet
+  return rec && rec.status === 'absent' ? 'absent' : null;
+}
+
 export default function AttendanceRecords() {
   const { user, effectiveUserId, pinSession } = useAuth();
   const supabase = createClient();
@@ -96,11 +162,13 @@ export default function AttendanceRecords() {
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [corrections, setCorrections] = useState<AttendanceCorrection[]>([]);
   const [userMonthlyHours, setUserMonthlyHours] = useState<UserMonthlyHours[]>([]);
+  const [holidayMap, setHolidayMap] = useState<Record<string, string>>({});          // 'YYYY-MM-DD' -> holiday name
+  const [leaveMap, setLeaveMap] = useState<Record<string, LeaveInfo>>({});            // 'userId|YYYY-MM-DD' -> leave
+  const [historyView, setHistoryView] = useState<'list' | 'calendar'>('calendar');
+  // List scope: 'mine' (default for everyone) or 'team' (managers/directors/executives only)
+  const [historyScope, setHistoryScope] = useState<'mine' | 'team'>('mine');
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'history' | 'corrections' | 'team-corrections' | 'monthly-hours'>('history');
-  // History tab scope: 'mine' shows only the logged-in user's records (default for everyone);
-  // 'team' (managers/directors/executives only) shows all employees' records.
-  const [historyScope, setHistoryScope] = useState<'mine' | 'team'>('mine');
   const [monthFilter, setMonthFilter] = useState<string>(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -145,7 +213,7 @@ export default function AttendanceRecords() {
 
       const [year, month] = monthFilter.split('-');
       const startDate = `${year}-${month}-01`;
-      const endDate = new Date(parseInt(year), parseInt(month), 0).toISOString().split('T')[0];
+      const endDate = toDateStr(new Date(parseInt(year), parseInt(month), 0));
 
       // Determine manager status from both profile and pinSession to avoid stale closure
       const managerFromPin = pinSession?.role === 'manager' || pinSession?.role === 'director' || pinSession?.role === 'executive';
@@ -160,7 +228,7 @@ export default function AttendanceRecords() {
         .order('work_date', { ascending: false });
 
       // Employees always see only their own records. Managers/directors see only
-      // their own records unless they explicitly switch the History scope to "Team".
+      // their own unless they switch the List scope to "Team Records".
       if (!canSeeAll || historyScope === 'mine') {
         query = query.eq('user_id', uid);
       }
@@ -168,6 +236,40 @@ export default function AttendanceRecords() {
       const { data, error } = await query;
       if (error) throw error;
       setRecords(data || []);
+
+      // Company holidays for the month (apply to everyone)
+      const { data: hols } = await supabase
+        .from('company_holidays')
+        .select('name, holiday_date')
+        .gte('holiday_date', startDate)
+        .lte('holiday_date', endDate);
+      const hMap: Record<string, string> = {};
+      (hols || []).forEach((h: any) => { hMap[String(h.holiday_date).slice(0, 10)] = h.name; });
+      setHolidayMap(hMap);
+
+      // Leave overlapping the month: approved leave replaces auto-absent,
+      // pending leave is kept so the calendar can hint at it.
+      let leaveQuery = supabase
+        .from('leave_requests')
+        .select('user_id, leave_type, start_date, end_date, status')
+        .in('status', ['approved', 'pending'])
+        .lte('start_date', endDate)
+        .gte('end_date', startDate);
+      if (!canSeeAll) leaveQuery = leaveQuery.eq('user_id', uid);
+      const { data: leaves } = await leaveQuery;
+      const lMap: Record<string, LeaveInfo> = {};
+      (leaves || []).forEach((lv: any) => {
+        const unpaid = /unpaid|lop|loss/i.test(String(lv.leave_type || ''));
+        const pending = lv.status !== 'approved';
+        eachDateInRange(lv.start_date, lv.end_date, (ds) => {
+          if (ds < startDate || ds > endDate) return;
+          const key = `${lv.user_id}|${ds}`;
+          // approved beats pending if both overlap
+          if (lMap[key] && !lMap[key].pending && pending) return;
+          lMap[key] = { status: unpaid ? 'unpaid_leave' : 'paid_leave', pending };
+        });
+      });
+      setLeaveMap(lMap);
     } catch (err: any) {
       toast.error('Failed to load attendance records: ' + (err.message || 'Unknown error'));
     } finally {
@@ -205,11 +307,11 @@ export default function AttendanceRecords() {
     try {
       const [year, month] = monthFilter.split('-');
       const startDate = `${year}-${month}-01`;
-      const endDate = new Date(parseInt(year), parseInt(month), 0).toISOString().split('T')[0];
+      const endDate = toDateStr(new Date(parseInt(year), parseInt(month), 0));
 
       const { data, error } = await supabase
         .from('attendance_records')
-        .select('user_id, total_hours, overtime_hours, status, user_profiles!attendance_records_user_id_fkey(full_name, department)')
+        .select('user_id, work_date, clock_in, total_hours, overtime_hours, status, user_profiles!attendance_records_user_id_fkey(full_name, department)')
         .gte('work_date', startDate)
         .lte('work_date', endDate);
 
@@ -230,11 +332,13 @@ export default function AttendanceRecords() {
             late_days: 0,
           };
         }
-        userMap[r.user_id].total_hours += Number(r.total_hours) || 0;
+        userMap[r.user_id].total_hours += dayHours(r); // working hours incl. overtime
         userMap[r.user_id].overtime_hours += Number(r.overtime_hours) || 0;
-        if (['present', 'work_from_home', 'half_day'].includes(r.status)) userMap[r.user_id].present_days++;
-        if (r.status === 'absent') userMap[r.user_id].absent_days++;
-        if (r.status === 'late') userMap[r.user_id].late_days++;
+        // Resolve first so an auto-absent on a holiday / approved leave day is not counted as absent
+        const st = resolveDayStatus(r.user_id, String(r.work_date).slice(0, 10), r, holidayMap, leaveMap) || r.status;
+        if (['present', 'work_from_home', 'half_day'].includes(st)) userMap[r.user_id].present_days++;
+        if (st === 'absent') userMap[r.user_id].absent_days++;
+        if (st === 'late') userMap[r.user_id].late_days++;
       });
 
       setUserMonthlyHours(
@@ -243,7 +347,7 @@ export default function AttendanceRecords() {
     } catch (err: any) {
       toast.error('Failed to load monthly hours data');
     }
-  }, [isManager, monthFilter]);
+  }, [isManager, monthFilter, holidayMap, leaveMap]);
 
   useEffect(() => { fetchProfile(); }, [fetchProfile]);
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
@@ -371,25 +475,53 @@ export default function AttendanceRecords() {
     }
   };
 
+  // Records as they should be DISPLAYED / COUNTED: an auto-generated absent on a
+  // holiday or approved-leave day becomes Holiday / Leave.
+  const effectiveRecords = useMemo(
+    () => records.map((r) => {
+      const st = resolveDayStatus(r.user_id, String(r.work_date).slice(0, 10), r, holidayMap, leaveMap);
+      return st && st !== r.status ? { ...r, status: st } : r;
+    }),
+    [records, holidayMap, leaveMap],
+  );
+
+  // The signed-in employee's own days, keyed by date, for the calendar view
+  const ownRecordsByDate = useMemo(() => {
+    const m: Record<string, AttendanceRecord> = {};
+    const uid = effectiveUserId;
+    effectiveRecords.forEach((r) => { if (r.user_id === uid) m[String(r.work_date).slice(0, 10)] = r; });
+    return m;
+  }, [effectiveRecords, effectiveUserId]);
+  const [filterYearForStats, filterMonthForStats] = monthFilter.split('-').map(Number);
+
   // Summary stats
-  const presentDays = records.filter(r => r.status === 'present' || r.status === 'work_from_home').length;
-  const paidLeaveDays = records.filter(r => r.status === 'paid_leave').length;
-  const unpaidLeaveDays = records.filter(r => r.status === 'unpaid_leave').length;
-  const absentDays = records.filter(r => r.status === 'absent').length;
-  const lateDays = records.filter(r => r.status === 'late').length;
-  const halfDays = records.filter(r => r.status === 'half_day').length;
-  const totalHours = records.reduce((sum, r) => sum + (r.total_hours || 0), 0);
-  const totalOvertime = records.reduce((sum, r) => sum + (r.overtime_hours || 0), 0);
-  const autoCheckouts = records.filter(r => (r as any).is_auto_checkout).length;
+  const presentDays = effectiveRecords.filter(r => r.status === 'present' || r.status === 'work_from_home').length;
+  const paidLeaveDays = effectiveRecords.filter(r => r.status === 'paid_leave').length;
+  const unpaidLeaveDays = effectiveRecords.filter(r => r.status === 'unpaid_leave').length;
+  // Past working days with no attendance row at all are absent too (employee view only —
+  // for managers the list mixes many people, so we can't know who is missing)
+  const missingAbsentDays = isManager ? 0 : Array.from({ length: new Date(filterYearForStats, filterMonthForStats, 0).getDate() }).filter((_, i) => {
+    const ds = `${filterYearForStats}-${pad2(filterMonthForStats)}-${pad2(i + 1)}`;
+    return !ownRecordsByDate[ds] && resolveDayStatus(effectiveUserId || '', ds, undefined, holidayMap, leaveMap) === 'absent';
+  }).length;
+  const absentDays = effectiveRecords.filter(r => r.status === 'absent').length + missingAbsentDays;
+  const lateDays = effectiveRecords.filter(r => r.status === 'late').length;
+  const halfDays = effectiveRecords.filter(r => r.status === 'half_day').length;
+  const totalHours = effectiveRecords.reduce((sum, r) => sum + dayHours(r), 0); // regular + overtime
+  const totalOvertime = effectiveRecords.reduce((sum, r) => sum + (r.overtime_hours || 0), 0);
+  const autoCheckouts = effectiveRecords.filter(r => (r as any).is_auto_checkout).length;
 
   const [filterYear, filterMonth] = monthFilter.split('-').map(Number);
   const daysInMonth = new Date(filterYear, filterMonth, 0).getDate();
+  // Working days exclude weekends AND company holidays
   const workingDaysInMonth = Array.from({ length: daysInMonth }, (_, i) => {
     const d = new Date(filterYear, filterMonth - 1, i + 1);
-    return d.getDay() !== 0 && d.getDay() !== 6;
+    return d.getDay() !== 0 && d.getDay() !== 6 && !holidayMap[toDateStr(d)];
   }).filter(Boolean).length;
 
-  const avgDailyHours = presentDays > 0 ? totalHours / presentDays : 0;
+
+  const workedDayCount = presentDays + lateDays + halfDays;
+  const avgDailyHours = workedDayCount > 0 ? totalHours / workedDayCount : 0;
   const attendancePct = workingDaysInMonth > 0 ? Math.round(((presentDays + paidLeaveDays) / workingDaysInMonth) * 100) : 0;
 
   const submitOvertime = async (e: React.FormEvent) => {
@@ -405,27 +537,52 @@ export default function AttendanceRecords() {
         .select('id, overtime_hours')
         .eq('user_id', uid)
         .eq('work_date', overtimeForm.work_date)
-        .single();
+        .maybeSingle();
 
       const newOT = parseFloat(overtimeForm.overtime_hours);
 
       if (existing) {
-        const { error } = await supabase
-          .from('attendance_records')
-          .update({
-            overtime_hours: (existing.overtime_hours || 0) + newOT,
-            notes: overtimeForm.notes || '',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', existing.id);
+        // Overtime only adds hours — it never changes the day's status
+        const updates: any = {
+          overtime_hours: (existing.overtime_hours || 0) + newOT,
+          updated_at: new Date().toISOString(),
+        };
+        if (overtimeForm.notes) updates.notes = overtimeForm.notes;
+        const { error } = await supabase.from('attendance_records').update(updates).eq('id', existing.id);
         if (error) throw error;
       } else {
+        // No row yet: store the day's TRUE status instead of forcing 'present'
+        // (holiday / weekend / approved leave / otherwise absent until a clock-in exists).
+        const d = overtimeForm.work_date;
+        const [y, m, dd] = d.split('-').map(Number);
+        const dow = new Date(y, m - 1, dd).getDay();
+        const { data: hol } = await supabase.from('company_holidays').select('id').eq('holiday_date', d).maybeSingle();
+        const { data: lv } = await supabase
+          .from('leave_requests')
+          .select('leave_type')
+          .eq('user_id', uid)
+          .eq('status', 'approved')
+          .lte('start_date', d)
+          .gte('end_date', d)
+          .limit(1)
+          .maybeSingle();
+        let status: AttendanceStatus = 'absent';
+        if (hol) status = 'holiday';
+        else if (dow === 0 || dow === 6) status = 'weekend';
+        else if (lv) status = /unpaid|lop|loss/i.test(String(lv.leave_type || '')) ? 'unpaid_leave' : 'paid_leave';
+
+        // Today/future working day with no clock-in: nothing to attach overtime to yet
+        if (status === 'absent' && d >= toDateStr(new Date())) {
+          toast.error('No attendance yet for this working day. Log overtime after you clock in, or pick a past date.');
+          return;
+        }
+
         const { error } = await supabase
           .from('attendance_records')
           .insert({
             user_id: uid,
-            work_date: overtimeForm.work_date,
-            status: 'present',
+            work_date: d,
+            status,
             overtime_hours: newOT,
             total_hours: 0,
             notes: overtimeForm.notes || '',
@@ -446,7 +603,7 @@ export default function AttendanceRecords() {
 
   const exportMonthlyHours = () => {
     if (userMonthlyHours.length === 0) { toast.error('No data to export'); return; }
-    const headers = ['Employee', 'Department', 'Total Hours', 'Overtime Hours', 'Present Days', 'Absent Days', 'Late Days'];
+    const headers = ['Employee', 'Department', 'Total Hours (incl. OT)', 'Overtime Hours', 'Present Days', 'Absent Days', 'Late Days'];
     const rows = userMonthlyHours.map(u => [
       u.full_name,
       u.department,
@@ -490,15 +647,16 @@ export default function AttendanceRecords() {
         </button>
         <button
           onClick={() => {
-            if (records.length === 0) { toast.error('No records to export'); return; }
-            const rows = records.map(r => ({
+            if (effectiveRecords.length === 0) { toast.error('No records to export'); return; }
+            const rows = effectiveRecords.map(r => ({
               Employee: r.user_profiles?.full_name || r.user_id,
               Department: r.user_profiles?.department || '',
               Date: r.work_date,
               Status: r.status,
               'Clock In': r.clock_in ? new Date(r.clock_in).toLocaleTimeString('en-IN') : '',
               'Clock Out': r.clock_out ? new Date(r.clock_out).toLocaleTimeString('en-IN') : '',
-              'Total Hours': r.total_hours || 0,
+              'Regular Hours': r.total_hours || 0,
+              'Working Hours (incl. OT)': dayHours(r),
               'Overtime Hours': r.overtime_hours || 0,
               Notes: r.notes || '',
             }));
@@ -536,7 +694,7 @@ export default function AttendanceRecords() {
           { label: 'Unpaid Leave', value: unpaidLeaveDays, color: 'text-orange-700', bg: 'bg-orange-50 border-orange-200' },
           { label: 'Late', value: lateDays, color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
           { label: 'Half Days', value: halfDays, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
-          { label: 'Total Hours', value: `${totalHours.toFixed(1)}h`, color: 'text-indigo-700', bg: 'bg-indigo-50 border-indigo-200' },
+          { label: 'Total Hours', sublabel: '(incl. OT)', value: `${totalHours.toFixed(1)}h`, color: 'text-indigo-700', bg: 'bg-indigo-50 border-indigo-200' },
           { label: 'Avg/Day', value: `${avgDailyHours.toFixed(1)}h`, color: 'text-purple-700', bg: 'bg-purple-50 border-purple-200' },
           { label: 'Overtime', value: `${totalOvertime.toFixed(1)}h`, color: 'text-orange-700', bg: 'bg-orange-50 border-orange-200' },
         ].map((kpi) => (
@@ -604,15 +762,27 @@ export default function AttendanceRecords() {
               onChange={(e) => setMonthFilter(e.target.value)}
               className="text-sm border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+            <div className="flex items-center gap-0.5 bg-slate-100 rounded-lg p-0.5">
+              {([
+                { id: 'calendar', label: 'Calendar', icon: CalendarDays },
+                { id: 'list', label: 'List', icon: List },
+              ] as const).map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => setHistoryView(v.id)}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-500 transition-all ${historyView === v.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  <v.icon size={12} />{v.label}
+                </button>
+              ))}
+            </div>
             {isManager && (
-              <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
+              <div className="flex items-center gap-0.5 bg-slate-100 rounded-lg p-0.5">
                 {(['mine', 'team'] as const).map((scope) => (
                   <button
                     key={scope}
                     onClick={() => setHistoryScope(scope)}
-                    className={`px-3 py-1 rounded-md text-xs font-500 transition-all ${
-                      historyScope === scope ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                    }`}
+                    className={`px-2.5 py-1 rounded-md text-xs font-500 transition-all ${historyScope === scope ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                   >
                     {scope === 'mine' ? 'My Records' : 'Team Records'}
                   </button>
@@ -628,12 +798,67 @@ export default function AttendanceRecords() {
             </button>
           </div>
 
+          {historyView === 'calendar' && !loading && (
+            <div className="p-4 border-b border-slate-100">
+              {isManager && (
+                <p className="text-[11px] text-slate-400 mb-2">Calendar always shows your own attendance. In List view, choose Team Records to see the whole team.</p>
+              )}
+              <div className="grid grid-cols-7 gap-1 mb-1">
+                {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                  <div key={d} className="text-center text-[10px] font-600 text-slate-400 uppercase tracking-wider py-1">{d}</div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {Array.from({ length: new Date(filterYear, filterMonth - 1, 1).getDay() }).map((_, i) => (
+                  <div key={`pad-${i}`} />
+                ))}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const day = i + 1;
+                  const dateStr = `${filterYear}-${pad2(filterMonth)}-${pad2(day)}`;
+                  const rec = ownRecordsByDate[dateStr];
+                  const uid = effectiveUserId || '';
+                  const st = resolveDayStatus(uid, dateStr, rec, holidayMap, leaveMap);
+                  const cfg = st ? statusConfig[st] : null;
+                  const pendingLeave = leaveMap[`${uid}|${dateStr}`]?.pending;
+                  const isToday = dateStr === toDateStr(new Date());
+                  return (
+                    <div
+                      key={dateStr}
+                      title={holidayMap[dateStr] || (cfg ? cfg.label : 'No record')}
+                      className={`min-h-[68px] rounded-lg border p-1.5 flex flex-col ${cfg ? cfg.color : 'text-slate-300 bg-white border-slate-100'} ${isToday ? 'ring-2 ring-blue-500' : ''}`}
+                    >
+                      <span className="text-[11px] font-700">{day}</span>
+                      {st === 'holiday' && holidayMap[dateStr] ? (
+                        <span className="text-[10px] font-600 leading-tight mt-0.5 line-clamp-2">{holidayMap[dateStr]}</span>
+                      ) : cfg ? (
+                        <span className="text-[10px] font-600 leading-tight mt-0.5">{cfg.label}</span>
+                      ) : null}
+                      {rec && dayHours(rec) > 0 && (
+                        <span className="text-[10px] mt-auto opacity-80">{dayHours(rec).toFixed(1)}h{rec.overtime_hours > 0 ? ` (+${rec.overtime_hours}h OT)` : ''}</span>
+                      )}
+                      {st === 'absent' && pendingLeave && (
+                        <span className="text-[9px] mt-auto text-orange-600 font-600">Leave pending</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-3">
+                {(['present', 'late', 'half_day', 'work_from_home', 'absent', 'paid_leave', 'unpaid_leave', 'holiday', 'weekend'] as AttendanceStatus[]).map((k) => (
+                  <span key={k} className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                    <span className={`w-2 h-2 rounded-full ${statusConfig[k].dot}`} />{statusConfig[k].label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div className="flex flex-col items-center justify-center py-12">
               <Loader2 size={24} className="animate-spin text-slate-400 mb-3" />
               <p className="text-sm text-slate-400">Loading attendance records…</p>
             </div>
-          ) : records.length === 0 ? (
+          ) : historyView === 'calendar' ? null : effectiveRecords.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-slate-400">
               <Calendar size={32} className="mb-3 opacity-50" />
               <p className="text-sm font-500">No attendance records for this month</p>
@@ -641,7 +866,7 @@ export default function AttendanceRecords() {
             </div>
           ) : (
             <div className="divide-y divide-slate-100">
-              {records.map((record) => {
+              {effectiveRecords.map((record) => {
                 const cfg = statusConfig[record.status];
                 return (
                   <div key={record.id} className="flex items-center gap-4 px-4 py-3 hover:bg-slate-50 transition-colors">
@@ -668,8 +893,8 @@ export default function AttendanceRecords() {
                       </span>
                       <span>→</span>
                       <span>{formatTime(record.clock_out)}</span>
-                      {record.total_hours > 0 && (
-                        <span className="font-600 text-indigo-600">{record.total_hours.toFixed(1)}h</span>
+                      {dayHours(record) > 0 && (
+                        <span className="font-600 text-indigo-600">{dayHours(record).toFixed(1)}h{record.overtime_hours > 0 && <span className="text-orange-600 font-500 ml-1">(incl. {record.overtime_hours}h OT)</span>}</span>
                       )}
                     </div>
                     <span className={`text-[11px] font-600 px-2 py-1 rounded-full border ${cfg.color}`}>
@@ -910,7 +1135,7 @@ export default function AttendanceRecords() {
                     <tr className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
                       <th className="text-left px-5 py-3 font-medium">Employee</th>
                       <th className="text-left px-4 py-3 font-medium">Department</th>
-                      <th className="text-right px-4 py-3 font-medium">Total Hours</th>
+                      <th className="text-right px-4 py-3 font-medium">Total Hours (incl. OT)</th>
                       <th className="text-right px-4 py-3 font-medium">Overtime</th>
                       <th className="text-right px-4 py-3 font-medium">Present</th>
                       <th className="text-right px-4 py-3 font-medium">Absent</th>
