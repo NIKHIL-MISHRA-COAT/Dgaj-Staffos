@@ -7,6 +7,7 @@ import { Crown, Users, AlertTriangle, CheckCircle2, Megaphone, TrendingDown, Clo
 import { toast, Toaster } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
+import { rolloverLeave, getFiscalYear } from '@/lib/leaveRollover';
 import { useLanguage } from '@/contexts/LanguageContext';
 
 interface Employee {
@@ -81,6 +82,7 @@ export default function DirectorControlPanel() {
     total_hours: number | null;
   } | null>(null);
   const [myTodayLoading, setMyTodayLoading] = useState(true);
+  const [rollingOver, setRollingOver] = useState(false);
   const { t } = useLanguage();
 
   const statusConfig = {
@@ -97,6 +99,45 @@ export default function DirectorControlPanel() {
     fetchEmployees();
     fetchPendingApprovals();
   }, [effectiveUserId]);
+
+  const handleLeaveRollover = async () => {
+    if (!effectiveUserId) return;
+    const fromFY = getFiscalYear();
+    const toFY = fromFY + 1;
+    const ok = window.confirm(
+      `Carry all unused leave from FY ${fromFY}-${fromFY + 1} into FY ${toFY}-${toFY + 1} for every employee?\n\n` +
+      `There is no cap and no expiry. Run it after the year closes so the figures are final. ` +
+      `Running it again only recalculates; nothing is counted twice.`
+    );
+    if (!ok) return;
+
+    setRollingOver(true);
+    try {
+      // Same scope as Leave Admin: firms this director can see for leave, else own firm.
+      const { data: visibleIds, error: firmErr } = await supabase.rpc('get_visible_firm_ids', {
+        p_user_id: effectiveUserId,
+        p_module: 'leave',
+      });
+      let firmIds: string[] = !firmErr && visibleIds?.length ? (visibleIds as string[]) : [];
+      if (firmIds.length === 0) {
+        const { data: me } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).maybeSingle();
+        if (me?.firm_id) firmIds = [me.firm_id as string];
+      }
+
+      const res = await rolloverLeave(supabase, { fromFY, toFY, firmIds });
+      if (res.rowsWritten === 0) {
+        toast.info(`No FY ${fromFY}-${fromFY + 1} balances found to carry forward`);
+      } else {
+        toast.success(
+          `Leave rolled over for ${res.employeesAffected} employees — ${res.daysCarried} days carried into FY ${toFY}-${toFY + 1}`
+        );
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Leave rollover failed');
+    } finally {
+      setRollingOver(false);
+    }
+  };
 
   const fetchDirectorName = async () => {
     if (!effectiveUserId) return;
@@ -423,6 +464,26 @@ export default function DirectorControlPanel() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Year-end leave rollover */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-card p-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center">
+            <Megaphone size={18} className="text-blue-600" />
+          </div>
+          <div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Leave rollover</p>
+            <p className="text-sm font-600 text-slate-900 dark:text-slate-100">
+              Carry unused leave from FY {getFiscalYear()}-{getFiscalYear() + 1} into FY {getFiscalYear() + 1}-{getFiscalYear() + 2}
+            </p>
+            <p className="text-xs text-slate-400 dark:text-slate-500">No cap, no expiry. Run after the year closes.</p>
+          </div>
+        </div>
+        <button onClick={handleLeaveRollover} disabled={rollingOver}
+          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-sm font-semibold transition-colors">
+          {rollingOver ? 'Rolling over…' : 'Start leave rollover'}
+        </button>
       </div>
 
       {/* KPI Overview */}
