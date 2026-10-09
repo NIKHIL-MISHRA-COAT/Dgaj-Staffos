@@ -48,7 +48,7 @@ function playChime() {
       osc.type = 'sine';
       osc.frequency.value = 880;
       gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.8, ctx.currentTime + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
       osc.connect(gain);
       gain.connect(ctx.destination);
