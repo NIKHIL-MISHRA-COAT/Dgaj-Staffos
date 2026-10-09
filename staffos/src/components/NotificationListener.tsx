@@ -63,7 +63,7 @@ function playChime() {
         osc.start(t0);
         osc.stop(t0 + length + 0.05);
       };
-      note(880, 0, 2.5);
+      note(660, 0, 1.5);
       // note(1320, 0.4, 2.1);
     };
     if (ctx.state === 'suspended') {
