@@ -6,6 +6,7 @@ import DashboardHeader from './components/DashboardHeader';
 import AttendanceHero from './components/AttendanceHero';
 import KPIBentoGrid from './components/KPIBentoGrid';
 import WeeklyAttendanceChart from './components/WeeklyAttendanceChart';
+import TodayTasksBox from './components/TodayTasksBox';
 import LeaveBalancePanel from './components/LeaveBalancePanel';
 import ActivityFeed from './components/ActivityFeed';
 import PermissionsPopup, { PERMISSIONS_DISMISSED_KEY } from '@/components/PermissionsPopup';
@@ -68,6 +69,7 @@ export default function EmployeeDashboardPage() {
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 sm:gap-5 mt-4 sm:mt-5">
           <div className="xl:col-span-2 space-y-4 sm:space-y-5">
             <WeeklyAttendanceChart />
+            <TodayTasksBox />
           </div>
           <div className="space-y-4 sm:space-y-5">
             <LeaveBalancePanel />

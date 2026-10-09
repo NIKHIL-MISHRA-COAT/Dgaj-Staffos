@@ -14,6 +14,7 @@ import {
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
+import { getFiscalYear } from '@/lib/leaveRollover';
 
 interface KPIData {
   tasksCompleted: number | null;
@@ -57,31 +58,61 @@ export default function KPIBentoGrid() {
     fetchKPIData(uid);
   }, [user?.id, pinSession?.userId]);
 
+  // Local date as YYYY-MM-DD (toISOString() shifts to UTC and gives yesterday in India before 5:30am)
+  const ymd = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
   const fetchKPIData = async (uid: string) => {
     setLoading(true);
     try {
       const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
-      const today = now.toISOString().split('T')[0];
-      const currentFY = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+      const today = ymd(now);
+      const monthStart = ymd(new Date(now.getFullYear(), now.getMonth(), 1));
+      const monthEnd = ymd(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - (now.getDay() === 0 ? 6 : now.getDay() - 1));
+      monday.setHours(0, 0, 0, 0);
+      const weekStart = ymd(monday);
+      const fiscalYear = getFiscalYear(now);
 
-      const [tasksRes, leaveBalRes, attendanceRes, ticketsRes] = await Promise.all([
+      // Tasks this person owns or collaborates on (same rule as My Tasks)
+      const { data: collabLinks, error: collabErr } = await supabase
+        .from('task_collaborators')
+        .select('task_id')
+        .eq('user_id', uid);
+      if (collabErr) console.warn('KPI collaborators:', collabErr.message);
+      const collabIds = (collabLinks || []).map((c: any) => c.task_id);
+
+      const [assignedRes, collabTasksRes, leaveBalRes, attendanceRes, instancesRes, ticketsRes] = await Promise.all([
         supabase
           .from('tasks')
-          .select('id, status, due_date, is_overdue')
-          .or(`assigned_to.eq.${uid},assigned_user_ids.cs.{${uid}},assigned_to_user_id.eq.${uid}`),
+          .select('id, task_status, due_date, completed_at')
+          .eq('assigned_to', uid)
+          .neq('task_status', 'cancelled'),
+        collabIds.length > 0
+          ? supabase
+              .from('tasks')
+              .select('id, task_status, due_date, completed_at')
+              .in('id', collabIds)
+              .neq('task_status', 'cancelled')
+          : Promise.resolve({ data: [], error: null }),
         supabase
           .from('leave_balances')
           .select('leave_type, total_days, used_days')
           .eq('user_id', uid)
-          .eq('fiscal_year', currentFY),
+          .eq('fiscal_year', fiscalYear),
         supabase
           .from('attendance_records')
-          .select('status, total_hours, overtime_hours')
+          .select('work_date, status, clock_in, overtime_hours')
           .eq('user_id', uid)
           .gte('work_date', monthStart)
           .lte('work_date', monthEnd),
+        supabase
+          .from('recurring_task_instances')
+          .select('id, status, due_date')
+          .eq('assigned_to', uid)
+          .gte('due_date', monthStart)
+          .lte('due_date', monthEnd),
         supabase
           .from('support_tickets')
           .select('id')
@@ -89,42 +120,62 @@ export default function KPIBentoGrid() {
           .in('status', ['open', 'in_progress']),
       ]);
 
-      // All tasks assigned to this user
-      const allTasks = tasksRes.data || [];
-      const tasksCompleted = allTasks.filter((t) => t.status === 'done').length;
-      const tasksPending = allTasks.filter((t) => ['todo', 'in-progress', 'review'].includes(t.status)).length;
-      const tasksOverdue = allTasks.filter((t) =>
-        t.is_overdue || (t.due_date && t.due_date < today && t.status !== 'done')
-      ).length;
+      // Log each failing query instead of silently showing zeros
+      const rows = (res: any, name: string): any[] => {
+        if (res?.error) console.warn(`KPI ${name}:`, res.error.message);
+        return res?.data || [];
+      };
 
-      // Leave remaining — try paid first, then substitute, then any
-      const leaveData = leaveBalRes.data || [];
-      const paidBalance = leaveData.find((b) => b.leave_type === 'paid');
-      const substituteBalance = leaveData.find((b) => b.leave_type === 'substitute');
+      // One-time tasks (own + collaborated), de-duplicated
+      const taskMap = new Map<string, any>();
+      [...rows(assignedRes, 'tasks'), ...rows(collabTasksRes, 'collab tasks')].forEach((t) => taskMap.set(t.id, t));
+      const monthTasks = [...taskMap.values()].filter((t) => t.due_date && t.due_date >= monthStart && t.due_date <= monthEnd);
+
+      const instances = rows(instancesRes, 'recurring instances');
+
+      // Completed this week: tasks finished since Monday + recurring instances done this week so far
+      const mondayMs = monday.getTime();
+      const tasksDoneThisWeek = [...taskMap.values()].filter(
+        (t) => t.task_status === 'completed' && t.completed_at && new Date(t.completed_at).getTime() >= mondayMs
+      ).length;
+      const instancesDoneThisWeek = instances.filter(
+        (i) => i.status === 'completed' && i.due_date >= weekStart && i.due_date <= today
+      ).length;
+      const tasksCompleted = tasksDoneThisWeek + instancesDoneThisWeek;
+
+      // Leave remaining (paid first, then substitute, then any)
+      const leaveData = rows(leaveBalRes, 'leave');
+      const paidBalance = leaveData.find((b: any) => b.leave_type === 'paid');
+      const substituteBalance = leaveData.find((b: any) => b.leave_type === 'substitute');
       const anyBalance = paidBalance || substituteBalance || leaveData[0];
       const leaveRemaining = anyBalance
-        ? Math.max(0, anyBalance.total_days - anyBalance.used_days)
+        ? Math.max(0, Number(anyBalance.total_days) - Number(anyBalance.used_days))
         : null;
 
-      // Attendance rate & overtime this month
-      const records = attendanceRes.data || [];
-      const workingDays = records.filter((r) => !['weekend', 'holiday'].includes(r.status));
-      const presentDays = workingDays.filter((r) => ['present', 'late', 'half_day', 'work_from_home'].includes(r.status));
+      // Attendance this month, up to today only.
+      // Blank status = present if clocked in, otherwise absent (same rule as Firm Reports).
+      const records = rows(attendanceRes, 'attendance').filter((r: any) => r.work_date <= today);
+      const normStatus = (r: any) => (r.status && r.status.trim() ? r.status : r.clock_in ? 'present' : 'absent');
+      const workingDays = records.filter((r: any) => !['weekend', 'holiday', 'leave', 'on_leave'].includes(normStatus(r)));
+      const presentDays = workingDays.filter((r: any) =>
+        ['present', 'late', 'half_day', 'work_from_home'].includes(normStatus(r))
+      );
       const attendanceRate = workingDays.length > 0
         ? Math.round((presentDays.length / workingDays.length) * 100)
         : 0;
-      const overtimeHours = records.reduce((sum, r) => sum + (Number(r.overtime_hours) || 0), 0);
+      const overtimeHours = records.reduce((sum: number, r: any) => sum + (Number(r.overtime_hours) || 0), 0);
 
-      // Productivity score: based on attendance rate + task completion rate
-      const taskTotal = allTasks.length;
-      const taskRate = taskTotal > 0 ? (tasksCompleted / taskTotal) * 100 : 0;
-      const attRate = attendanceRate ?? 0;
-      const productivityScore = taskTotal > 0 || records.length > 0
-        ? Math.round((attRate * 0.6 + taskRate * 0.4))
+      // Productivity = 60% attendance + 40% share of this month's tasks completed
+      const monthTotal = monthTasks.length + instances.length;
+      const monthDone =
+        monthTasks.filter((t) => t.task_status === 'completed').length +
+        instances.filter((i) => i.status === 'completed').length;
+      const taskRate = monthTotal > 0 ? (monthDone / monthTotal) * 100 : 0;
+      const productivityScore = monthTotal > 0 || workingDays.length > 0
+        ? Math.round(attendanceRate * 0.6 + taskRate * 0.4)
         : 0;
 
-      // Open tickets
-      const openTickets = (ticketsRes.data || []).length;
+      const openTickets = rows(ticketsRes, 'tickets').length;
 
       setKpi({
         tasksCompleted,
@@ -157,7 +208,7 @@ export default function KPIBentoGrid() {
       id: 'kpi-productivity',
       label: 'Productivity',
       value: kpi.productivityScore !== null ? `${kpi.productivityScore}%` : '0%',
-      sub: 'Score',
+      sub: 'This month',
       icon: Zap,
       colorClass: 'text-blue-700 dark:text-blue-400',
       bgClass: 'bg-blue-50 dark:bg-blue-900/20 border-blue-100 dark:border-blue-800',

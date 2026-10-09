@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { Plus, CalendarDays } from 'lucide-react';
+import { Plus, CalendarDays, ChevronDown } from 'lucide-react';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
@@ -40,6 +40,8 @@ export default function LeaveBalancePanel() {
   const supabase = createClient();
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [loading, setLoading] = useState(true);
+  // Collapsed by default; click the title to open the balances
+  const [expanded, setExpanded] = useState(false);
 
   const getEffectiveUserId = (): string | null => {
     if (user?.id) return user.id;
@@ -132,20 +134,33 @@ export default function LeaveBalancePanel() {
 
   return (
     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-card p-5">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Leave Balance</h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Current financial year</p>
-        </div>
+      <div className={`flex items-center justify-between ${expanded ? 'mb-4' : ''}`}>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="flex items-center gap-2 text-left min-w-0"
+        >
+          <ChevronDown
+            size={16}
+            className={`text-slate-400 flex-shrink-0 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`}
+          />
+          <div className="min-w-0">
+            <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Leave Balance</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {expanded ? 'Current financial year' : 'Tap to view'}
+            </p>
+          </div>
+        </button>
         <Link href="/leave-management">
-          <button className="btn-ghost text-xs py-1.5 px-3 border border-slate-200 dark:border-slate-700">
+          <button className="btn-ghost text-xs py-1.5 px-3 border border-slate-200 dark:border-slate-700 flex-shrink-0">
             <Plus size={13} />
             Apply Leave
           </button>
         </Link>
       </div>
 
-      {loading ? (
+      {!expanded ? null : loading ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
             <div key={i} className="animate-pulse">
