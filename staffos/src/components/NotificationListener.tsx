@@ -45,22 +45,26 @@ function playChime() {
     const play = () => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      // Two-note chime at a clearly audible level (peak 0.6 of full scale).
-      const note = (freq: number, start: number) => {
+      // About 2.5 seconds: two overlapping notes that hold, then fade out.
+      // CHIME_VOLUME is the one setting to change for loudness (0 to 1; above ~0.5 each note gets loud).
+      const CHIME_VOLUME = 0.99;
+      const note = (freq: number, start: number, length: number) => {
+        const t0 = ctx.currentTime + start;
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
         osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
-        gain.gain.exponentialRampToValueAtTime(1, ctx.currentTime + start + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + 0.4);
+        gain.gain.setValueAtTime(0.0001, t0);
+        gain.gain.exponentialRampToValueAtTime(CHIME_VOLUME, t0 + 0.05);
+        gain.gain.setValueAtTime(CHIME_VOLUME, t0 + length * 0.6);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + length);
         osc.connect(gain);
         gain.connect(ctx.destination);
-        osc.start(ctx.currentTime + start);
-        osc.stop(ctx.currentTime + start + 0.45);
+        osc.start(t0);
+        osc.stop(t0 + length + 0.05);
       };
-      note(880, 0);
-      note(1320, 0.18);
+      note(880, 0, 2.5);
+      note(1320, 0.4, 2.1);
     };
     if (ctx.state === 'suspended') {
       // Still locked (no interaction yet): try to resume, then play if it worked.
