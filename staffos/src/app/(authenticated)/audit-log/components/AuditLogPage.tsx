@@ -27,9 +27,16 @@ const MODULE_COLORS: Record<string, string> = {
   attendance: 'bg-emerald-100 text-emerald-700',
   leave: 'bg-amber-100 text-amber-700',
   expenses: 'bg-rose-100 text-rose-700',
-  discrepancies: 'bg-orange-100 text-orange-700',
+  support: 'bg-orange-100 text-orange-700',
+  calendar: 'bg-cyan-100 text-cyan-700',
+  payroll: 'bg-teal-100 text-teal-700',
+  documents: 'bg-indigo-100 text-indigo-700',
+  settings: 'bg-slate-200 text-slate-700',
   users: 'bg-purple-100 text-purple-700',
 };
+
+// Modules the database triggers write (must match audit_row_change in the SQL)
+const MODULES = ['tasks', 'attendance', 'leave', 'expenses', 'support', 'calendar', 'payroll', 'documents', 'users', 'settings'];
 
 const ACTION_COLORS: Record<string, string> = {
   INSERT: 'bg-emerald-100 text-emerald-700',
@@ -84,21 +91,36 @@ export default function AuditLogPage() {
     setLoading(true);
     try {
       let q = supabase
-        .from('user_audit_log')
+        .from('audit_log')
         .select('*, user_profiles(full_name, role)', { count: 'exact' })
         .gte('created_at', dateFrom + 'T00:00:00')
         .lte('created_at', dateTo + 'T23:59:59')
         .order('created_at', { ascending: false })
         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-      if (userFilter !== 'all') q = q.eq('user_id', userFilter);
+      if (userFilter !== 'all') q = q.eq('actor_id', userFilter);
       if (moduleFilter !== 'all') q = q.eq('module', moduleFilter);
       if (actionFilter !== 'all') q = q.eq('action', actionFilter);
 
       const { data, error, count } = await q;
       if (error) throw error;
 
-      let filtered = data || [];
+      // Map audit_log columns onto the names this page displays
+      const mapped: AuditEntry[] = (data || []).map((r: any) => ({
+        id: r.id,
+        user_id: r.actor_id,
+        action: r.action,
+        table_name: r.target_table || '',
+        record_id: r.target_id,
+        old_values: r.old_data,
+        new_values: r.new_data,
+        ip_address: r.ip_address,
+        module: r.module,
+        created_at: r.created_at,
+        user_profiles: r.user_profiles,
+      }));
+
+      let filtered = mapped;
       if (searchQuery) {
         const q2 = searchQuery.toLowerCase();
         filtered = filtered.filter((e: AuditEntry) =>
@@ -112,7 +134,7 @@ export default function AuditLogPage() {
       setLogs(filtered);
       setTotalCount(count || 0);
     } catch (err: any) {
-      // If user_audit_log doesn't exist, show empty state gracefully
+      toast.error('Could not load audit log: ' + (err?.message || 'unknown error'));
       setLogs([]);
       setTotalCount(0);
     } finally {
@@ -140,7 +162,7 @@ export default function AuditLogPage() {
     toast.success('Audit log exported');
   };
 
-  const modules = ['tasks', 'attendance', 'leave', 'expenses', 'discrepancies', 'users'];
+  const modules = MODULES;
 
   return (
     <div className="max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
