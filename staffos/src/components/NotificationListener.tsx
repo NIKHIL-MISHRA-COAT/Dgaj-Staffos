@@ -64,7 +64,7 @@ function playChime() {
         osc.stop(t0 + length + 0.05);
       };
       note(880, 0, 2.5);
-      note(1320, 0.4, 2.1);
+      // note(1320, 0.4, 2.1);
     };
     if (ctx.state === 'suspended') {
       // Still locked (no interaction yet): try to resume, then play if it worked.
