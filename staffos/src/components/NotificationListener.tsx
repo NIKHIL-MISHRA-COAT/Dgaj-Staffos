@@ -18,25 +18,51 @@ interface IncomingNotification {
 const POPUP_MS = 7000;
 const MAX_VISIBLE = 3;
 
-function playChime() {
+// One shared audio context. Browsers keep it "suspended" until the user interacts
+// with the page, so it is resumed on the first click or key press (see unlockAudio).
+let sharedAudio: AudioContext | null = null;
+
+function getAudio(): AudioContext | null {
   try {
     const Ctx = window.AudioContext || (window as any).webkitAudioContext;
-    if (!Ctx) return;
-    const ctx = new Ctx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = 880;
-    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.4);
-    setTimeout(() => ctx.close().catch(() => {}), 700);
+    if (!Ctx) return null;
+    if (!sharedAudio) sharedAudio = new Ctx();
+    return sharedAudio;
   } catch {
-    // Browsers block audio until the user has interacted with the page — fine to skip silently.
+    return null;
+  }
+}
+
+function unlockAudio() {
+  const ctx = getAudio();
+  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+}
+
+function playChime() {
+  try {
+    const ctx = getAudio();
+    if (!ctx) return;
+    const play = () => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.4);
+    };
+    if (ctx.state === 'suspended') {
+      // Still locked (no interaction yet): try to resume, then play if it worked.
+      ctx.resume().then(play).catch(() => {});
+    } else {
+      play();
+    }
+  } catch {
+    // Audio unavailable on this device — the popup still shows.
   }
 }
 
@@ -73,6 +99,17 @@ export default function NotificationListener() {
     },
     [supabase, dismiss, router]
   );
+
+  // Unlock sound on the first click or key press so the chime can play later.
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
 
   useEffect(() => {
     if (!effectiveUserId) return;

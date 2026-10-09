@@ -65,6 +65,14 @@ const numOfYmd = (s: string) => { const [y, m, d] = s.slice(0, 10).split('-').ma
 const dateOfNum = (n: number) => new Date(n * 86400000);
 const fmtNum = (n: number) => dateOfNum(n).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 
+// Attendance rows sometimes have a blank status. A row with a clock-in is present;
+// a row with neither a status nor a clock-in is a placeholder for not clocking in, so absent.
+const normStatus = (status: any, clockIn: any): string => {
+  const s = String(status ?? '').trim().toLowerCase();
+  if (s) return s;
+  return clockIn ? 'present' : 'absent';
+};
+
 async function fetchAll(make: () => any): Promise<any[]> {
   const rows: any[] = [];
   for (let from = 0; ; from += 1000) {
@@ -85,7 +93,7 @@ async function loadAll(supabase: any): Promise<Source> {
   const [firmsRes, tasks, attendance, leaves, employees, leaveSpans] = await Promise.all([
     supabase.from('firms').select('id, name, code').order('name'),
     fetchAll(() => supabase.from('tasks').select('id, firm_id, status, created_at').gte('created_at', sinceIso).order('id')),
-    fetchAll(() => supabase.from('attendance_records').select('id, user_id, firm_id, status, work_date').gte('work_date', sinceDate).order('id')),
+    fetchAll(() => supabase.from('attendance_records').select('id, user_id, firm_id, status, clock_in, work_date').gte('work_date', sinceDate).order('id')),
     fetchAll(() => supabase.from('leave_requests').select('id, firm_id, created_at').gte('created_at', sinceIso).order('id')),
     fetchAll(() => supabase.from('user_profiles').select('id, firm_id, role, created_at').eq('is_active', true).order('id')),
     // approved leave that overlaps the window: those days are leave, not absence
@@ -107,20 +115,24 @@ async function loadAll(supabase: any): Promise<Source> {
     opt('expenses', () => fetchAll(() => supabase.from(X.table).select('*').gte(X.date, sinceIso).order('id'))),
     opt('holidays', () => fetchAll(() => supabase.from(H.table).select('*').gte(H.date, sinceDate).order('id'))),
     opt('staff', () => fetchAll(() => supabase.from('user_profiles').select(`id, ${S.name}`).eq('is_active', true).order('id'))),
-    opt('staff', () => fetchAll(() => supabase.from('attendance_records').select(`id, ${S.attEmp}, status, work_date`).gte('work_date', sinceDate).order('id'))),
+    opt('staff', () => fetchAll(() => supabase.from('attendance_records').select(`id, ${S.attEmp}, status, clock_in, work_date`).gte('work_date', sinceDate).order('id'))),
     opt('staff', () => fetchAll(() => supabase.from('tasks').select(`id, ${S.taskEmp}, status, created_at`).gte('created_at', sinceIso).order('id'))),
   ]);
 
   // Absent = a working day (not Sat/Sun, not a holiday) where an active employee has
   // no attendance record and no approved leave. Days before the employee's join date are skipped.
   const holidayDays = new Set<number>(holRows.filter((r: any) => r[H.date]).map((r: any) => numOfYmd(String(r[H.date]))));
-  const attendanceKeys = new Set<string>(attendance.map((r: any) => `${r.user_id}|${numOfYmd(String(r.work_date))}`));
+  const attendanceKeys = new Set<string>(
+    attendance
+      .filter((r: any) => normStatus(r.status, r.clock_in) !== 'absent')
+      .map((r: any) => `${r.user_id}|${numOfYmd(String(r.work_date))}`)
+  );
   const onLeaveKeys = new Set<string>();
   leaveSpans.forEach((l: any) => {
     const end = numOfYmd(String(l.end_date));
     for (let d = numOfYmd(String(l.start_date)); d <= end; d++) onLeaveKeys.add(`${l.user_id}|${d}`);
   });
-  const absentRows: { user_id: string; firm_id: string | null; work_date: string }[] = [];
+  const absentRows: { user_id: string; firm_id: string | null; work_date: string; status: string }[] = [];
   const lastNum = numOfDate(today);
   for (let d = numOfDate(since); d <= lastNum; d++) {
     const dow = dateOfNum(d).getUTCDay();
@@ -131,7 +143,7 @@ async function loadAll(supabase: any): Promise<Source> {
       if (d < joinNum) continue;
       const key = `${e.id}|${d}`;
       if (attendanceKeys.has(key) || onLeaveKeys.has(key)) continue;
-      absentRows.push({ user_id: String(e.id), firm_id: e.firm_id ?? null, work_date: dateStr });
+      absentRows.push({ user_id: String(e.id), firm_id: e.firm_id ?? null, work_date: dateStr, status: 'absent' });
     }
   }
 
@@ -162,14 +174,14 @@ async function loadAll(supabase: any): Promise<Source> {
   return {
     firms: (firmsRes.data as Firm[]) || [],
     tasks: tasks.map((r) => ({ firm: fk(r.firm_id), day: numOfDate(new Date(r.created_at)), status: String(r.status ?? '').toLowerCase() })),
-    attendance: [...attendance, ...absentRows].map((r: any) => ({ firm: fk(r.firm_id), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
+    attendance: [...attendance, ...absentRows].map((r: any) => ({ firm: fk(r.firm_id), day: numOfYmd(String(r.work_date)), status: normStatus(r.status, r.clock_in) })),
     leaves: leaves.map((r) => ({ firm: fk(r.firm_id), day: numOfDate(new Date(r.created_at)), status: '' })),
     employees: employees.map((r) => ({ id: String(r.id), firm: fk(r.firm_id), role: String(r.role ?? 'employee').toLowerCase() })),
     todayNum: numOfDate(today),
     payroll, expenses, names, warn,
     holidays: holRows.filter((r: any) => r[H.date]).map((r: any) => ({ day: numOfYmd(String(r[H.date])), name: r[H.name] ?? 'Holiday' })),
     staffAtt: [
-      ...sAtt.map((r: any) => ({ emp: String(r[S.attEmp]), day: numOfYmd(String(r.work_date)), status: String(r.status ?? '').toLowerCase() })),
+      ...sAtt.map((r: any) => ({ emp: String(r[S.attEmp]), day: numOfYmd(String(r.work_date)), status: normStatus(r.status, r.clock_in) })),
       ...absentRows.map((r) => ({ emp: r.user_id, day: numOfYmd(r.work_date), status: 'absent' })),
     ],
     staffTasks: sTask.map((r: any) => ({ emp: String(r[S.taskEmp]), day: numOfDate(new Date(r.created_at)), status: String(r.status ?? '').toLowerCase() })),
