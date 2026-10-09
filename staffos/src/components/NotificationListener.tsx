@@ -45,15 +45,22 @@ function playChime() {
     const play = () => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.8, ctx.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.4);
+      // Two-note chime at a clearly audible level (peak 0.6 of full scale).
+      const note = (freq: number, start: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+        gain.gain.exponentialRampToValueAtTime(1, ctx.currentTime + start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + 0.4);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + 0.45);
+      };
+      note(880, 0);
+      note(1320, 0.18);
     };
     if (ctx.state === 'suspended') {
       // Still locked (no interaction yet): try to resume, then play if it worked.
@@ -153,7 +160,10 @@ export default function NotificationListener() {
           }
         }
       )
-      .subscribe();
+      .subscribe((status, err) => {
+        // Shows in the browser console (F12). SUBSCRIBED = live updates are working.
+        console.info('[notifications realtime]', status, err?.message ?? '');
+      });
 
     const currentTimers = timers.current;
     return () => {
