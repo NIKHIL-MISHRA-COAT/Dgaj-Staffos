@@ -109,7 +109,8 @@ export default function DocumentsPage() {
       if (error) throw error;
       setDocuments(data || []);
     } catch (err: any) {
-      toast.error('Failed to load documents');
+      console.error('Documents load error:', err);
+      toast.error('Failed to load documents: ' + (err?.message || 'unknown error'));
     } finally {
       setLoading(false);
     }
@@ -154,10 +155,16 @@ export default function DocumentsPage() {
       if (uploadErr) throw uploadErr;
       const { data: urlData } = supabase.storage.from('documents').getPublicUrl(filePath);
       const tags = form.tags.split(',').map(t => t.trim()).filter(Boolean);
+      // Every company document belongs to a firm. Fall back to the Main Firm if the uploader has none.
       const { data: uploaderProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).single();
+      let firmId: string | null = uploaderProfile?.firm_id || null;
+      if (!firmId) {
+        const { data: mainFirm } = await supabase.from('firms').select('id').eq('code', 'MAIN').maybeSingle();
+        firmId = mainFirm?.id || null;
+      }
       const { error } = await supabase.from('company_documents').insert({
         title: form.title.trim(),
-        firm_id: uploaderProfile?.firm_id || null,
+        firm_id: firmId,
         description: form.description,
         document_type: form.document_type,
         file_url: urlData.publicUrl,
@@ -408,6 +415,4 @@ export default function DocumentsPage() {
       )}
     </>
   );
-
-  
 }

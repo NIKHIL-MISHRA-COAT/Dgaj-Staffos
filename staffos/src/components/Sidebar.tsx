@@ -45,7 +45,7 @@ const navItems: NavItem[] = [
   { id: 'nav-discrepancy', label: 'Client Discrepancies', icon: AlertTriangle, href: '/client-discrepancy-reports', group: 'collaborate' },
 
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
-  { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'resources' },
+  { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'resources' , managerOnly: true},
   { id: 'nav-audit-log', label: 'Audit Log', icon: ScrollText, href: '/audit-log', group: 'resources' },
   { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'resources', managerOnly: true },
   { id: 'nav-user-mgmt', label: 'User Management', icon: UserCog, href: '/user-management', group: 'resources', managerOnly: true },
