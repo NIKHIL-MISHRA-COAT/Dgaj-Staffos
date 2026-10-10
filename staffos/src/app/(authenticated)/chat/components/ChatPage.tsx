@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { MessageSquare, Send, Plus, Hash, Users, Search, X, Smile, Paperclip, ChevronLeft, Loader2, Edit2, Trash2, Reply, Building2 } from 'lucide-react';
+import { MessageSquare, Send, Plus, Hash, Users, Search, X, Smile, Paperclip, ChevronLeft, Loader2, Edit2, Trash2, Reply, Building2, UserPlus } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
@@ -52,7 +52,7 @@ interface NewChannelForm {
   channel_type: string;
   department: string;
   scope: 'firm' | 'people';
-  target_firm_id: string;
+  target_firm_ids: string[];
   member_ids: string[];
 }
 
@@ -97,9 +97,15 @@ export default function ChatPage() {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState<string | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
-  const emptyChannelForm: NewChannelForm = { name: '', description: '', channel_type: 'general', department: '', scope: 'firm', target_firm_id: '', member_ids: [] };
+  const emptyChannelForm: NewChannelForm = { name: '', description: '', channel_type: 'general', department: '', scope: 'firm', target_firm_ids: [], member_ids: [] };
   const [newChannelForm, setNewChannelForm] = useState<NewChannelForm>(emptyChannelForm);
   const [memberSearch, setMemberSearch] = useState('');
+  const [showAddMembers, setShowAddMembers] = useState(false);
+  const [addFirmIds, setAddFirmIds] = useState<string[]>([]);
+  const [addMemberIds, setAddMemberIds] = useState<string[]>([]);
+  const [addSearch, setAddSearch] = useState('');
+  const [addSaving, setAddSaving] = useState(false);
+  const [existingMemberIds, setExistingMemberIds] = useState<string[]>([]);
   const [firmOptions, setFirmOptions] = useState<{ id: string; name: string; code: string }[]>([]);
 
   const uid = effectiveUserId;
@@ -374,24 +380,31 @@ export default function ChatPage() {
   const handleCreateChannel = async () => {
     const f = newChannelForm;
     if (!f.name.trim() || !uid) return;
-    if (f.scope === 'firm' && !f.target_firm_id) { toast.error('Select a firm'); return; }
+    if (f.scope === 'firm' && f.target_firm_ids.length === 0) { toast.error('Select at least one firm'); return; }
     if (f.scope === 'people' && f.member_ids.length === 0) { toast.error('Select at least one employee'); return; }
     try {
       const { data: creatorProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', uid).single();
-      const { data, error } = await supabase.from('chat_channels').insert({
+      const base = {
         name: f.name.trim(),
         description: f.description,
         channel_type: f.channel_type,
         department: f.department || null,
-        scope: f.scope,
-        firm_id: f.scope === 'firm' ? f.target_firm_id : (creatorProfile?.firm_id || null),
         created_by: uid,
-      }).select().single();
+      };
+
+      // One channel per firm, so each firm's employees see it in their own firm's list
+      const rows = f.scope === 'firm'
+        ? f.target_firm_ids.map((firmId) => ({ ...base, scope: 'firm', firm_id: firmId }))
+        : [{ ...base, scope: 'people', firm_id: creatorProfile?.firm_id || null }];
+
+      const { data, error } = await supabase.from('chat_channels').insert(rows).select();
       if (error) throw error;
+      const created = (data || []) as Channel[];
+      if (created.length === 0) throw new Error('Channel was not created');
 
       if (f.scope === 'people') {
         const memberRows = Array.from(new Set([uid, ...f.member_ids])).map((user_id) => ({
-          channel_id: data.id,
+          channel_id: created[0].id,
           user_id,
           role: user_id === uid ? 'admin' : 'member',
         }));
@@ -399,14 +412,62 @@ export default function ChatPage() {
         if (memberErr) throw memberErr;
       }
 
-      setChannels(prev => [...prev, data]);
-      setActiveChannel(data);
+      setChannels(prev => [...prev, ...created]);
+      setActiveChannel(created[0]);
       setShowNewChannel(false);
       setNewChannelForm(emptyChannelForm);
       setMemberSearch('');
-      toast.success('Channel created');
+      toast.success(created.length > 1 ? `${created.length} channels created (one per firm)` : 'Channel created');
     } catch (err: any) {
       toast.error(err.message || 'Failed to create channel');
+    }
+  };
+
+  const openAddMembers = async () => {
+    if (!activeChannel) return;
+    const { data } = await supabase.from('chat_channel_members').select('user_id').eq('channel_id', activeChannel.id);
+    setExistingMemberIds((data || []).map((r: any) => r.user_id as string));
+    setAddFirmIds([]);
+    setAddMemberIds([]);
+    setAddSearch('');
+    setShowAddMembers(true);
+  };
+
+  const handleAddMembers = async () => {
+    if (!activeChannel || !uid) return;
+    const newMembers = addMemberIds.filter((id) => !existingMemberIds.includes(id) && id !== uid);
+    if (addFirmIds.length === 0 && newMembers.length === 0) { toast.error('Pick a firm or an employee'); return; }
+    setAddSaving(true);
+    try {
+      let createdChannels: Channel[] = [];
+      if (addFirmIds.length > 0) {
+        // Another firm gets its own copy of this channel, so its employees see it in their list
+        const rows = addFirmIds.map((firmId) => ({
+          name: activeChannel.name,
+          description: activeChannel.description,
+          channel_type: activeChannel.channel_type,
+          department: activeChannel.department,
+          scope: 'firm',
+          firm_id: firmId,
+          created_by: uid,
+        }));
+        const { data, error } = await supabase.from('chat_channels').insert(rows).select();
+        if (error) throw error;
+        createdChannels = (data || []) as Channel[];
+      }
+      if (newMembers.length > 0) {
+        const { error } = await supabase.from('chat_channel_members').insert(
+          newMembers.map((user_id) => ({ channel_id: activeChannel.id, user_id, role: 'member' }))
+        );
+        if (error) throw error;
+      }
+      if (createdChannels.length > 0) setChannels((prev) => [...prev, ...createdChannels]);
+      setShowAddMembers(false);
+      toast.success('Channel updated');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update channel');
+    } finally {
+      setAddSaving(false);
     }
   };
 
@@ -417,8 +478,8 @@ export default function ChatPage() {
     }
   };
 
-  // Directors, managers and employees can create channels
-  const canCreateChannel = ['director', 'manager', 'employee'].includes(currentUser?.role || '');
+  // Directors and managers create channels
+  const canCreateChannel = ['director', 'manager'].includes(currentUser?.role || '');
 
   const filteredChannels = channels.filter(c =>
     !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -527,6 +588,12 @@ export default function ChatPage() {
                     <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{activeChannel.description}</p>
                   )}
                 </div>
+                {canCreateChannel && (
+                  <button onClick={openAddMembers} title="Add firm or employees"
+                    className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+                    <UserPlus size={15} className="text-slate-600 dark:text-slate-400" />
+                  </button>
+                )}
                 <div className="flex items-center gap-1 text-xs text-slate-400">
                   <Users size={13} />
                   <span>{users.length}</span>
@@ -758,16 +825,38 @@ export default function ChatPage() {
               </div>
               {newChannelForm.scope === 'firm' && (
                 <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Firm *</label>
-                  <select value={newChannelForm.target_firm_id}
-                    onChange={e => setNewChannelForm(p => ({ ...p, target_firm_id: e.target.value }))}
-                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400">
-                    <option value="">Select firm…</option>
-                    {firmOptions.map((f) => (
-                      <option key={f.id} value={f.id}>{f.name} ({f.code})</option>
-                    ))}
-                  </select>
-                  <p className="text-[11px] text-slate-500 mt-1">Everyone in this firm will see the channel.</p>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-600 text-slate-700 dark:text-slate-300">Firms * ({newChannelForm.target_firm_ids.length} selected)</label>
+                    <button type="button"
+                      onClick={() => setNewChannelForm(p => ({
+                        ...p,
+                        target_firm_ids: p.target_firm_ids.length === firmOptions.length ? [] : firmOptions.map((f) => f.id),
+                      }))}
+                      className="text-xs font-600 text-blue-600 hover:text-blue-700">
+                      {newChannelForm.target_firm_ids.length === firmOptions.length && firmOptions.length > 0 ? 'Clear all' : 'Select all firms'}
+                    </button>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto border border-slate-200 dark:border-slate-600 rounded-xl divide-y divide-slate-100 dark:divide-slate-700">
+                    {firmOptions.length === 0 && (
+                      <p className="px-3 py-3 text-sm text-slate-500">No firms available</p>
+                    )}
+                    {firmOptions.map((f) => {
+                      const checked = newChannelForm.target_firm_ids.includes(f.id);
+                      return (
+                        <label key={f.id} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700">
+                          <input type="checkbox" checked={checked}
+                            onChange={() => setNewChannelForm(p => ({
+                              ...p,
+                              target_firm_ids: checked ? p.target_firm_ids.filter((id) => id !== f.id) : [...p.target_firm_ids, f.id],
+                            }))}
+                            className="accent-blue-600" />
+                          <span className="text-sm text-slate-800 dark:text-slate-200">{f.name}</span>
+                          <span className="text-xs text-slate-500 ml-auto">{f.code}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1">Everyone in each selected firm will see the channel.</p>
                 </div>
               )}
               {newChannelForm.scope === 'people' && (
@@ -814,6 +903,77 @@ export default function ChatPage() {
               <button onClick={handleCreateChannel}
                 className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-600 transition-colors">
                 Create Channel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Add firm / employees to this channel */}
+      {showAddMembers && activeChannel && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+              <h3 className="text-base font-700 text-slate-900 dark:text-slate-100">Add to #{activeChannel.name}</h3>
+              <button onClick={() => setShowAddMembers(false)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+                <X size={18} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-5">
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Add another firm ({addFirmIds.length} selected)</label>
+                <div className="max-h-40 overflow-y-auto border border-slate-200 dark:border-slate-600 rounded-xl divide-y divide-slate-100 dark:divide-slate-700">
+                  {firmOptions
+                    .filter((f) => !channels.some((c) => c.name === activeChannel.name && c.scope === 'firm' && c.firm_id === f.id))
+                    .map((f) => {
+                      const checked = addFirmIds.includes(f.id);
+                      return (
+                        <label key={f.id} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700">
+                          <input type="checkbox" checked={checked} className="accent-blue-600"
+                            onChange={() => setAddFirmIds(p => checked ? p.filter((id) => id !== f.id) : [...p, f.id])} />
+                          <span className="text-sm text-slate-800 dark:text-slate-200">{f.name}</span>
+                          <span className="text-xs text-slate-500 ml-auto">{f.code}</span>
+                        </label>
+                      );
+                    })}
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Add employees ({addMemberIds.length} selected)</label>
+                <input type="text" placeholder="Search by name or firm…" value={addSearch}
+                  onChange={e => setAddSearch(e.target.value)}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 mb-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                <div className="max-h-48 overflow-y-auto border border-slate-200 dark:border-slate-600 rounded-xl divide-y divide-slate-100 dark:divide-slate-700">
+                  {users
+                    .filter((u) => u.id !== uid && !existingMemberIds.includes(u.id))
+                    .filter((u) => {
+                      const q = addSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      const firm = firmOptions.find((f) => f.id === (u as any).firm_id)?.name || '';
+                      return u.full_name.toLowerCase().includes(q) || firm.toLowerCase().includes(q);
+                    })
+                    .map((u) => {
+                      const checked = addMemberIds.includes(u.id);
+                      const firm = firmOptions.find((f) => f.id === (u as any).firm_id)?.name;
+                      return (
+                        <label key={u.id} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700">
+                          <input type="checkbox" checked={checked} className="accent-blue-600"
+                            onChange={() => setAddMemberIds(p => checked ? p.filter((id) => id !== u.id) : [...p, u.id])} />
+                          <span className="text-sm text-slate-800 dark:text-slate-200">{u.full_name}</span>
+                          {firm && <span className="text-xs text-slate-500 ml-auto">{firm}</span>}
+                        </label>
+                      );
+                    })}
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700">
+              <button onClick={() => setShowAddMembers(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 text-sm font-600 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleAddMembers} disabled={addSaving}
+                className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-sm font-600 transition-colors">
+                {addSaving ? 'Saving…' : 'Add'}
               </button>
             </div>
           </div>
