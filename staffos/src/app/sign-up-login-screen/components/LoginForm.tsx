@@ -13,8 +13,8 @@ type Step = 'email' | 'pin';
 
 const roleRoutes: Record<string, string> = {
   employee: '/employee-dashboard',
-  manager: '/employee-dashboard',
-  executive: '/employee-dashboard',
+  manager: '/analytics-reporting-dashboard',
+  executive: '/analytics-reporting-dashboard',
   director: '/director-control-panel',
 };
 
@@ -37,13 +37,19 @@ export default function LoginForm() {
 
   useEffect(() => {
     const existing = getPinSession();
-    if (existing?.email && existing?.role) {
-      setHasPinSession(true);
-      setPinSessionData(existing);
-      setEmailValue(existing.email);
-      setStep('pin');
-    }
-    setCheckingSession(false);
+    supabase.auth.getSession().then(({ data }) => {
+      // Only skip the PIN prompt when a real login exists. Older PIN sessions have no
+      // login behind them, so they must enter their PIN again.
+      if (existing?.email && existing?.role && data.session) {
+        setHasPinSession(true);
+        setPinSessionData(existing);
+        setEmailValue(existing.email);
+        setStep('pin');
+      } else if (existing && !data.session) {
+        clearPinSession();
+      }
+      setCheckingSession(false);
+    });
   }, []);
 
   const handleEmailContinue = () => {
