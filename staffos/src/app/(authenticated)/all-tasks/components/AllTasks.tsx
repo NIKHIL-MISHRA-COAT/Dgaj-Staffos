@@ -1451,16 +1451,23 @@ export default function TasksHub() {
 
       const list: any[] = Array.from(rows.values()).map(t => ({ ...t, __collab: collabIds.has(t.id) }));
 
-      // recurring instances (separate table) — only for "my" view
-      if (!(canToggleScope && scope === 'all')) {
-        const ri = await supabase
-          .from('recurring_task_instances')
-          .select('*, recurring_tasks(title, frequency)')
-          .eq('assigned_to', uid)
-          .order('due_date', { ascending: false })
-          .limit(200);
-        if (!ri.error) (ri.data || []).forEach((i: any) => list.push({ ...i, __source: 'instance' }));
+      // Recurring instances (separate table). Employees: their own. Directors: everyone.
+      // Managers: people in the firms they can see (sharing rule).
+      let riQuery: any = supabase
+        .from('recurring_task_instances')
+        .select('*, recurring_tasks(title, frequency)')
+        .order('due_date', { ascending: false })
+        .limit(500);
+      if (!canToggleScope) {
+        riQuery = riQuery.eq('assigned_to', uid);
+      } else if (!isDirector) {
+        const { data: fids } = await supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'tasks' });
+        const { data: people } = await supabase.from('user_profiles').select('id').in('firm_id', fids || []);
+        const allowedIds = (people || []).map((p: any) => p.id);
+        riQuery = allowedIds.length > 0 ? riQuery.in('assigned_to', allowedIds) : null;
       }
+      const ri = riQuery ? await riQuery : { data: [], error: null };
+      if (!ri.error) (ri.data || []).forEach((i: any) => list.push({ ...i, __source: 'instance' }));
 
       setRawTasks(list);
     } catch (err: any) {
