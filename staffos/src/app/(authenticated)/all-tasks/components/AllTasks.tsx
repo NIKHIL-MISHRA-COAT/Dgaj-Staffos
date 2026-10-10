@@ -769,7 +769,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   CheckCircle2, Circle, AlertTriangle, Clock, Flag, Repeat, Users, Calendar, CalendarDays,
   Loader2, RefreshCw, Plus, ArrowLeft, Search, X, SlidersHorizontal, ChevronDown, Zap,
-  BarChart3, TrendingUp, Inbox, CheckSquare, Building2, Tag, User,
+  BarChart3, TrendingUp, Inbox, CheckSquare, Building2, Tag, User, Trash2,
 } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -777,6 +777,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
 import { useVisibleFirms } from '@/lib/useVisibleFirms';
 import FirmBadge from '@/components/FirmBadge';
+import FirmFilterTabs from '@/components/FirmFilterTabs';
 
 /* ───────────────────────── Types ───────────────────────── */
 
@@ -810,6 +811,7 @@ interface Row {
   completed_at: string | null;
   created_at: string;
   collaborator: boolean;
+  mine: boolean; // assigned to me or created by me (lets me ask others to join)
   firm_id: string | null;
 }
 
@@ -981,12 +983,22 @@ interface TaskRowProps {
   busy: boolean;
   showAssignee: boolean;
   firm?: { name: string; code: string } | null;
+  canDelete: boolean;
+  candidates: UserProfile[];
   onToggle: () => void;
   onComplete: () => void;
   onStatus: (s: TaskStatus) => void;
+  onDelete: () => void;
+  onRequest: (userId: string) => Promise<boolean>;
 }
 
-function TaskRow({ row, today, expanded, busy, showAssignee, firm, onToggle, onComplete, onStatus }: TaskRowProps) {
+/* One table row. Click the row to open the description; click again to close. */
+function TaskRow({
+  row, today, expanded, busy, showAssignee, firm, canDelete, candidates,
+  onToggle, onComplete, onStatus, onDelete, onRequest,
+}: TaskRowProps) {
+  const [pick, setPick] = useState('');
+  const [sending, setSending] = useState(false);
   const sc = STATUS_CONFIG[row.status];
   const pc = PRIORITY_CONFIG[row.priority];
   const done = row.status === 'completed';
@@ -998,110 +1010,163 @@ function TaskRow({ row, today, expanded, busy, showAssignee, firm, onToggle, onC
       : diff === 0 ? 'Today'
       : diff === 1 ? 'Tomorrow'
       : fmtDay(row.due_date!);
+  const names = row.assigneeNames;
+  const canRequest = row.source === 'task' && !done && row.mine && candidates.length > 0;
+
+  const sendRequest = async () => {
+    if (!pick) return;
+    setSending(true);
+    const ok = await onRequest(pick);
+    setSending(false);
+    if (ok) setPick('');
+  };
 
   return (
-    <div className={`rounded-xl border border-l-4 shadow-sm transition-shadow hover:shadow-md bg-white dark:bg-slate-800/60 ${pc.border} ${
-      overdue ? 'border-red-200 dark:border-red-900/50' : 'border-slate-200 dark:border-slate-700'
-    }`}>
-      <div className="flex items-start gap-3 p-3.5 cursor-pointer" onClick={onToggle}>
-        <button
-          onClick={e => { e.stopPropagation(); onComplete(); }}
-          disabled={busy || (row.source === 'instance' && done)}
-          className="mt-0.5 flex-shrink-0 disabled:opacity-60"
-          title={done ? 'Reopen' : 'Mark complete'}
-        >
-          {busy ? <Loader2 size={18} className="animate-spin text-blue-500" />
-            : done ? <CheckCircle2 size={18} className="text-emerald-500" />
-            : <Circle size={18} className="text-slate-300 hover:text-emerald-500 transition-colors" />}
-        </button>
+    <>
+      <tr
+        onClick={onToggle}
+        className={`cursor-pointer align-top transition-colors ${
+          expanded ? 'bg-slate-50 dark:bg-slate-800/60' : 'hover:bg-slate-50/70 dark:hover:bg-slate-800/40'
+        }`}
+      >
+        <td className="py-3 pl-2 pr-1 w-9">
+          <button
+            onClick={e => { e.stopPropagation(); onComplete(); }}
+            disabled={busy || (row.source === 'instance' && done)}
+            className="disabled:opacity-60"
+            title={done ? 'Reopen' : 'Mark complete'}
+          >
+            {busy ? <Loader2 size={18} className="animate-spin text-blue-500" />
+              : done ? <CheckCircle2 size={18} className="text-emerald-500" />
+              : <Circle size={18} className="text-slate-300 hover:text-emerald-500 transition-colors" />}
+          </button>
+        </td>
 
-        <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-2">
-            <p className={`text-sm font-semibold leading-snug ${done ? 'line-through text-slate-400' : 'text-slate-900 dark:text-slate-100'}`}>
+        <td className="py-3 pr-4 min-w-[200px]">
+          <div className="flex items-center gap-1.5">
+            <span className={`text-sm font-semibold ${done ? 'line-through text-slate-400' : 'text-slate-900 dark:text-slate-100'}`}>
               {row.title}
-            </p>
-            <ChevronDown size={15} className={`flex-shrink-0 mt-0.5 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-          </div>
-
-          <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-            <span className={`px-2 py-0.5 rounded-md text-[11px] font-semibold ${pc.bg} ${pc.color}`}>{pc.label}</span>
-            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold ${sc.bg} ${sc.color}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{sc.label}
             </span>
-            {dueLabel && (
-              <span className={`inline-flex items-center gap-1 text-[11px] ${overdue ? 'text-red-600 font-semibold' : 'text-slate-500 dark:text-slate-400'}`}>
-                <Clock size={11} />{dueLabel}{row.due_time ? ` · ${String(row.due_time).slice(0, 5)}` : ''}
-              </span>
-            )}
-            {row.recurring && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-300">
-                <Repeat size={10} />{row.frequency ? row.frequency : 'Recurring'}
-              </span>
-            )}
-            {row.blocked && row.status !== 'blocked' && <Flag size={12} className="text-red-500" />}
-            {row.collaborator && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-500">
-                <Users size={11} />Collaborating
-              </span>
-            )}
-            {row.client && (
-              <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 px-1.5 py-0.5 rounded-md">
-                <Building2 size={10} />{row.client}
-              </span>
-            )}
-            {showAssignee && (
-              <span className="inline-flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
-                <User size={11} />{row.assignee}
-              </span>
-            )}
-            {showAssignee && firm && <FirmBadge firmName={firm.name} firmCode={firm.code} />}
+            {row.recurring && <Repeat size={11} className="text-purple-500 flex-shrink-0" />}
+            {row.blocked && row.status !== 'blocked' && <Flag size={11} className="text-red-500 flex-shrink-0" />}
+            {row.collaborator && <Users size={11} className="text-indigo-500 flex-shrink-0" />}
           </div>
-
-          {row.progress > 0 && !done && (
-            <div className="flex items-center gap-2 mt-2">
-              <div className="w-28 h-1.5 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500 rounded-full" style={{ width: `${Math.min(100, row.progress)}%` }} />
-              </div>
-              <span className="text-[11px] text-slate-400">{row.progress}%</span>
+          {(row.client || row.category || (showAssignee && firm)) && (
+            <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 flex-wrap">
+              {row.client && <span>{row.client}</span>}
+              {row.client && row.category && <span className="text-slate-300">·</span>}
+              {row.category && <span>{row.category}</span>}
+              {showAssignee && firm && <FirmBadge firmName={firm.name} firmCode={firm.code} />}
             </div>
           )}
-        </div>
-      </div>
+        </td>
+
+        <td className="py-3 pr-4 whitespace-nowrap">
+          <span className={`px-2 py-0.5 rounded-md text-[11px] font-semibold ${pc.bg} ${pc.color}`}>{pc.label}</span>
+        </td>
+
+        <td className="py-3 pr-4 whitespace-nowrap">
+          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold ${sc.bg} ${sc.color}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{sc.label}
+          </span>
+        </td>
+
+        <td className="py-3 pr-4 text-xs text-slate-700 dark:text-slate-200 whitespace-nowrap" title={names.join(', ')}>
+          {names.length === 0 ? <span className="text-slate-300">—</span> : (
+            <>
+              {names[0]}
+              {names.length > 1 && <span className="ml-1 text-[10px] font-semibold text-blue-600 dark:text-blue-300">+{names.length - 1}</span>}
+            </>
+          )}
+        </td>
+
+        <td className="py-3 pr-4 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+          {row.assigned_by || <span className="text-slate-300">—</span>}
+        </td>
+
+        <td className="py-3 pr-2 text-xs whitespace-nowrap">
+          {dueLabel ? (
+            <span className={`inline-flex items-center gap-1 ${overdue ? 'text-red-600 font-semibold' : 'text-slate-600 dark:text-slate-300'}`}>
+              <Clock size={11} />{dueLabel}{row.due_time ? ` · ${String(row.due_time).slice(0, 5)}` : ''}
+            </span>
+          ) : <span className="text-slate-300">—</span>}
+        </td>
+      </tr>
 
       {expanded && (
-        <div className="border-t border-slate-100 dark:border-slate-700 px-4 py-3 bg-slate-50/60 dark:bg-slate-900/30 rounded-b-xl">
-          {row.description && (
-            <p className="text-sm text-slate-600 dark:text-slate-300 mb-3 whitespace-pre-wrap">{row.description}</p>
-          )}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs mb-3">
-            <div><p className="text-slate-400">Assigned to</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.assignee}</p></div>
-            <div><p className="text-slate-400">Assigned by</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.assigned_by || '—'}</p></div>
-            <div><p className="text-slate-400">Category</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.category || '—'}</p></div>
-            <div><p className="text-slate-400">Est. hours</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.est_hours > 0 ? `${row.est_hours}h` : '—'}</p></div>
-          </div>
-          {row.source === 'task' ? (
-            <div className="flex flex-wrap gap-1.5">
-              {(['not_started', 'in_progress', 'waiting', 'blocked', 'completed'] as TaskStatus[]).map(s => (
-                <button
-                  key={s}
-                  onClick={() => onStatus(s)}
-                  disabled={busy}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
-                    row.status === s
-                      ? 'bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900'
-                      : 'bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600'
-                  }`}
-                >
-                  {STATUS_CONFIG[s].label}
-                </button>
-              ))}
+        <tr className="bg-slate-50 dark:bg-slate-800/60" onClick={e => e.stopPropagation()}>
+          <td />
+          <td colSpan={6} className="pb-4 pr-4">
+            <div className="space-y-3">
+              <p className={`text-sm whitespace-pre-wrap ${row.description ? 'text-slate-600 dark:text-slate-300' : 'text-slate-400 italic'}`}>
+                {row.description || 'No description'}
+              </p>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div><p className="text-slate-400">Assigned to</p><p className="font-medium text-slate-700 dark:text-slate-200">{names.join(', ') || '—'}</p></div>
+                <div><p className="text-slate-400">Assigned by</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.assigned_by || '—'}</p></div>
+                <div><p className="text-slate-400">Category</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.category || '—'}</p></div>
+                <div><p className="text-slate-400">Est. hours</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.est_hours > 0 ? `${row.est_hours}h` : '—'}</p></div>
+              </div>
+
+              {row.source === 'task' ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {(['not_started', 'in_progress', 'waiting', 'blocked', 'completed'] as TaskStatus[]).map(s => (
+                    <button
+                      key={s}
+                      onClick={() => onStatus(s)}
+                      disabled={busy}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                        row.status === s
+                          ? 'bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900'
+                          : 'bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600'
+                      }`}
+                    >
+                      {STATUS_CONFIG[s].label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">Recurring instance — tick the circle to mark it done.</p>
+              )}
+
+              {canRequest && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">Ask someone to join:</span>
+                  <select
+                    value={pick}
+                    onChange={e => setPick(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Choose a person…</option>
+                    {candidates.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                  </select>
+                  <button
+                    onClick={sendRequest}
+                    disabled={!pick || sending}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium disabled:opacity-50"
+                  >
+                    {sending ? 'Sending…' : 'Send request'}
+                  </button>
+                </div>
+              )}
+
+              {canDelete && row.source === 'task' && (
+                <div>
+                  <button
+                    onClick={onDelete}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-red-600 hover:text-red-700 disabled:opacity-50"
+                  >
+                    <Trash2 size={13} /> Delete task
+                  </button>
+                </div>
+              )}
             </div>
-          ) : (
-            <p className="text-xs text-slate-400">Recurring instance — tick the circle to mark it done.</p>
-          )}
-        </div>
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   );
 }
 
@@ -1116,7 +1181,7 @@ function CreateTaskModal({
 }) {
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
-    title: '', description: '', priority: 'medium' as Priority, assignee: uid,
+    title: '', description: '', priority: 'medium' as Priority, assignees: [uid] as string[],
     due_date: '', due_time: '', recurring: '', category_id: '', client_org_id: '',
   });
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
@@ -1129,7 +1194,7 @@ function CreateTaskModal({
     if (!f.title.trim()) { toast.error('Task title is required'); return; }
     setSaving(true);
     try {
-      const assignee = users.find(u => u.id === f.assignee);
+      const picked = users.filter(u => f.assignees.includes(u.id));
       const cat = categories.find(c => c.id === f.category_id);
       const org = clients.find(c => c.id === f.client_org_id);
       const { error } = await supabase.from('tasks').insert({
@@ -1140,11 +1205,12 @@ function CreateTaskModal({
         task_status: 'not_started',
         due_date: f.due_date || null,
         due_time: f.due_time || null,
-        assigned_to: f.assignee || null,
-        assigned_to_user_id: f.assignee || null,
-        assigned_to_name: assignee?.full_name || 'Unassigned',
-        assigned_to_dept: assignee?.department || 'General',
-        assigned_user_ids: f.assignee ? [f.assignee] : [],
+        // First picked person is the primary assignee; every picked person is in assigned_user_ids
+        assigned_to: f.assignees[0] || null,
+        assigned_to_user_id: f.assignees[0] || null,
+        assigned_to_name: picked.map(u => u.full_name).join(', ') || 'Unassigned',
+        assigned_to_dept: picked[0]?.department || 'General',
+        assigned_user_ids: f.assignees,
         assigned_by: uid,
         created_by: uid,
         creator_id: uid,
@@ -1215,11 +1281,34 @@ function CreateTaskModal({
             </div>
           </div>
           <div>
-            <label className={labelCls}>Assign to</label>
-            <select className={inputCls} value={f.assignee} onChange={e => set('assignee', e.target.value)}>
-              <option value="">Unassigned</option>
-              {users.map(u => <option key={u.id} value={u.id}>{u.full_name}{u.id === uid ? ' (me)' : ''}</option>)}
-            </select>
+            <label className={labelCls}>Assign to (one or more)</label>
+            <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
+              {users.map(u => {
+                const on = f.assignees.includes(u.id);
+                return (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => setF(p => ({
+                      ...p,
+                      assignees: p.assignees.includes(u.id)
+                        ? p.assignees.filter(x => x !== u.id)
+                        : [...p.assignees, u.id],
+                    }))}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                      on
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                    }`}
+                  >
+                    {u.full_name}{u.id === uid ? ' (me)' : ''}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              {f.assignees.length === 0 ? 'Unassigned' : `${f.assignees.length} selected`}
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -1270,7 +1359,9 @@ export default function TasksHub() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
-  const [scope, setScope] = useState<Scope>('mine');
+  // The "My Tasks" option is gone from this tab. Directors and managers always get the
+  // list for the firms they can see; employees only see their own tasks (effectiveScope).
+  const scope: Scope = 'all';
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [quick, setQuick] = useState<Quick>('none');
   const [search, setSearch] = useState('');
@@ -1283,6 +1374,8 @@ export default function TasksHub() {
   const [showCompleted, setShowCompleted] = useState(false);
   const [firms, setFirms] = useState<{ id: string; name: string; code: string }[]>([]);
   const [firmF, setFirmF] = useState('all');
+  // How far back completed tasks are shown (only used when "Show completed" is on)
+  const [doneRange, setDoneRange] = useState<'yesterday' | '7d' | '30d' | 'all'>('7d');
 
   const isDirector = role === 'director';
   const isManager = role === 'manager' || role === 'executive';
@@ -1400,6 +1493,7 @@ export default function TasksHub() {
         recurring: true, frequency: t.recurring_tasks?.frequency || null,
         blocked: false, progress: 0, est_hours: 0,
         completed_at: t.completion_datetime || null, created_at: t.created_at || '', collaborator: false, firm_id: null,
+        mine: true,
       };
     }
     const ids: string[] = Array.isArray(t.assigned_user_ids) ? t.assigned_user_ids : [];
@@ -1422,6 +1516,7 @@ export default function TasksHub() {
       progress: Number(t.completion_percentage) || 0, est_hours: Number(t.estimated_hours) || 0,
       completed_at: t.completed_at || null, created_at: t.created_at || '',
       collaborator: !!t.__collab && !mine,
+      mine: mine || uid === t.creator_id,
       firm_id: t.firm_id || null,
     };
   }).filter(r => r.status !== 'cancelled'), [rawTasks, userMap, catMap, catSlugMap, clientMap, uid, userName]);
@@ -1454,6 +1549,27 @@ export default function TasksHub() {
 
   const completedLocalDate = (r: Row) => (r.completed_at ? toLocalDate(new Date(r.completed_at)) : '');
 
+  // Date window for completed tasks: yesterday, last 7 / 30 days, or all past
+  const doneCutoff = useMemo(() => {
+    const d = new Date();
+    if (doneRange === 'yesterday') {
+      d.setDate(d.getDate() - 1);
+      const y = toLocalDate(d);
+      return { from: y, to: y as string | null };
+    }
+    if (doneRange === '7d') { d.setDate(d.getDate() - 6); return { from: toLocalDate(d), to: null as string | null }; }
+    if (doneRange === '30d') { d.setDate(d.getDate() - 29); return { from: toLocalDate(d), to: null as string | null }; }
+    return { from: null as string | null, to: null as string | null };
+  }, [doneRange]);
+
+  const inDoneRange = (r: Row) => {
+    const c = completedLocalDate(r);
+    if (!c) return false;
+    if (doneCutoff.from && c < doneCutoff.from) return false;
+    if (doneCutoff.to && c > doneCutoff.to) return false;
+    return true;
+  };
+
   const kpis = useMemo(() => {
     const active = typed.filter(r => r.status !== 'completed');
     const completed = typed.filter(r => r.status === 'completed');
@@ -1476,6 +1592,7 @@ export default function TasksHub() {
     return typed.filter(r => {
       const b = bucketOf(r, today);
       if (b === 'done' && !(showCompleted || statusF === 'completed' || quick === 'done')) return false;
+      if (b === 'done' && quick !== 'done' && statusF !== 'completed' && !inDoneRange(r)) return false;
       if (q && !(r.title.toLowerCase().includes(q) || r.assignee.toLowerCase().includes(q) || r.client.toLowerCase().includes(q))) return false;
       if (statusF !== 'all' && r.status !== statusF) return false;
       if (priorityF !== 'all' && r.priority !== priorityF) return false;
@@ -1492,7 +1609,7 @@ export default function TasksHub() {
         default: return true;
       }
     });
-  }, [typed, search, statusF, priorityF, categoryF, clientF, assigneeF, quick, showCompleted, today, weekStart]);
+  }, [typed, search, statusF, priorityF, categoryF, clientF, assigneeF, quick, showCompleted, today, weekStart, doneCutoff]);
 
   const grouped = useMemo(() => {
     const g: Record<Bucket, Row[]> = { overdue: [], today: [], tomorrow: [], week: [], later: [], nodate: [], done: [] };
@@ -1600,13 +1717,52 @@ export default function TasksHub() {
     { key: 'none', label: 'On-Time Rate', value: `${kpis.onTimeRate.toFixed(0)}%`, icon: TrendingUp, text: 'text-teal-600', bg: 'bg-teal-50 dark:bg-teal-900/20', ring: '', clickable: false },
   ];
 
+  // Ask another person to join a task. They receive it as a pending invite (accept/decline in Task Board).
+  const requestCollaborator = async (row: Row, userId: string): Promise<boolean> => {
+    const target = users.find(u => u.id === userId);
+    const { error } = await supabase.from('task_collaborators').insert({
+      task_id: row.id,
+      user_id: userId,
+      role: 'collaborator',
+      status: 'pending',
+      invited_by: uid,
+      invited_by_name: userName,
+      added_by: uid,
+    });
+    if (error) {
+      toast.error(error.code === '23505' ? `${target?.full_name || 'They'} is already on this task` : error.message);
+      return false;
+    }
+    toast.success(`Request sent to ${target?.full_name || 'them'}`);
+    return true;
+  };
+
+  // Directors and managers only (permission is also checked in the UI; RLS allows any signed-in delete today)
+  const deleteTask = async (row: Row) => {
+    if (row.source !== 'task') return;
+    if (!window.confirm(`Delete "${row.title}"? This cannot be undone.`)) return;
+    setBusyKey(row.key);
+    try {
+      const { error } = await supabase.from('tasks').delete().eq('id', row.id);
+      if (error) throw error;
+      setRawTasks(prev => prev.filter(r => !(r.__source === 'task' && r.id === row.id)));
+      setExpanded(null);
+      toast.success('Task deleted');
+    } catch (err: any) {
+      toast.error(err?.message || 'Could not delete task');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const scopeSubtitle =
     !canToggleScope ? 'Your tasks'
-      : scope === 'mine' ? 'Tasks assigned to you'
       : isDirector ? 'Every task across all firms'
-      : 'Every task in your firm';
+      : 'Tasks in the firms you can see';
 
   const totalVisible = visible.length;
+  const firmById = Object.fromEntries(visibleFirms.map(f => [f.id, { name: f.name, code: f.code }]));
+  const canDelete = isDirector || role === 'manager';
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950">
@@ -1644,16 +1800,6 @@ export default function TasksHub() {
 
           {/* Toggles */}
           <div className="flex items-center gap-3 mt-4 flex-wrap">
-            {canToggleScope && (
-              <Segmented<Scope>
-                value={scope}
-                onChange={v => { setScope(v); setExpanded(null); setAssigneeF('all'); setFirmF('all'); }}
-                options={[
-                  { value: 'mine', label: 'My Tasks', icon: User },
-                  { value: 'all', label: isDirector ? 'All Tasks · All Firms' : 'All Tasks · My Firm', icon: Users },
-                ]}
-              />
-            )}
             <Segmented<TypeFilter>
               value={typeFilter}
               onChange={setTypeFilter}
@@ -1663,21 +1809,13 @@ export default function TasksHub() {
                 { value: 'recurring', label: 'Recurring', icon: Repeat, count: typeCounts.recurring },
               ]}
             />
-            {effectiveScope === 'all' && firmOptions.length > 1 && (
-              <div className="relative">
-                <Building2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-                <select
-                  value={firmF}
-                  onChange={e => { setFirmF(e.target.value); setAssigneeF('all'); }}
-                  className="pl-8 pr-8 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-medium appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="all">{isDirector ? 'All firms' : 'All my firms'}</option>
-                  {firmOptions.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                </select>
-                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-              </div>
-            )}
           </div>
+          {/* Firm tabs: shown in both My Tasks and All Tasks, only when the user can see more than one firm */}
+          <FirmFilterTabs
+            firms={visibleFirms}
+            selectedFirmId={firmF}
+            onSelect={id => { setFirmF(id); setAssigneeF('all'); }}
+          />
         </div>
       </div>
 
@@ -1729,6 +1867,18 @@ export default function TasksHub() {
               <input type="checkbox" checked={showCompleted} onChange={e => setShowCompleted(e.target.checked)} className="rounded border-slate-300" />
               Show completed
             </label>
+            {showCompleted && (
+              <Segmented<'yesterday' | '7d' | '30d' | 'all'>
+                value={doneRange}
+                onChange={setDoneRange}
+                options={[
+                  { value: 'yesterday', label: 'Yesterday' },
+                  { value: '7d', label: 'Last 7 days' },
+                  { value: '30d', label: 'Last 30 days' },
+                  { value: 'all', label: 'All past' },
+                ]}
+              />
+            )}
             {(activeFilters > 0 || quick !== 'none' || search) && (
               <button onClick={clearAll} className="text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 flex items-center gap-1">
                 <X size={13} /> Clear
@@ -1762,35 +1912,56 @@ export default function TasksHub() {
             </p>
           </div>
         ) : (
-          <div className="space-y-6">
-            {SECTIONS.map(sec => {
-              const items = grouped[sec.key];
-              if (items.length === 0) return null;
-              const Icon = sec.icon;
-              return (
-                <section key={sec.key}>
-                  <div className="flex items-center gap-2 mb-2.5">
-                    <Icon size={14} className={sec.head} />
-                    <h3 className={`text-sm font-bold ${sec.head}`}>{sec.label}</h3>
-                    <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${sec.badge}`}>{items.length}</span>
-                    <div className="flex-1 h-px bg-slate-200 dark:bg-slate-800" />
-                  </div>
-                  <div className="space-y-2">
-                    {items.map(r => (
-                      <TaskRow
-                        key={r.key} row={r} today={today}
-                        expanded={expanded === r.key}
-                        busy={busyKey === r.key}
-                        showAssignee={effectiveScope === 'all'}
-                        onToggle={() => setExpanded(expanded === r.key ? null : r.key)}
-                        onComplete={() => changeStatus(r, r.status === 'completed' ? 'not_started' : 'completed')}
-                        onStatus={s => changeStatus(r, s)}
-                      />
-                    ))}
-                  </div>
-                </section>
-              );
-            })}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  <th className="py-2 pl-2 pr-1 w-9" />
+                  <th className="py-2 pr-4 font-semibold">Task</th>
+                  <th className="py-2 pr-4 font-semibold">Priority</th>
+                  <th className="py-2 pr-4 font-semibold">Status</th>
+                  <th className="py-2 pr-4 font-semibold">Assigned to</th>
+                  <th className="py-2 pr-4 font-semibold">Assigned by</th>
+                  <th className="py-2 pr-2 font-semibold">Due</th>
+                </tr>
+              </thead>
+              <tbody>
+                {SECTIONS.map(sec => {
+                  const items = grouped[sec.key];
+                  if (items.length === 0) return null;
+                  const Icon = sec.icon;
+                  return (
+                    <React.Fragment key={sec.key}>
+                      <tr>
+                        <td colSpan={7} className="pt-6 pb-2">
+                          <div className="flex items-center gap-2">
+                            <Icon size={14} className={sec.head} />
+                            <span className={`text-sm font-bold ${sec.head}`}>{sec.label}</span>
+                            <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${sec.badge}`}>{items.length}</span>
+                          </div>
+                        </td>
+                      </tr>
+                      {items.map(r => (
+                        <TaskRow
+                          key={r.key} row={r} today={today}
+                          expanded={expanded === r.key}
+                          busy={busyKey === r.key}
+                          showAssignee={effectiveScope === 'all'}
+                          firm={r.firm_id ? firmById[r.firm_id] : null}
+                          canDelete={canDelete}
+                          candidates={users.filter(u => u.id !== uid)}
+                          onToggle={() => setExpanded(expanded === r.key ? null : r.key)}
+                          onComplete={() => changeStatus(r, r.status === 'completed' ? 'not_started' : 'completed')}
+                          onStatus={s => changeStatus(r, s)}
+                          onDelete={() => deleteTask(r)}
+                          onRequest={userId => requestCollaborator(r, userId)}
+                        />
+                      ))}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
