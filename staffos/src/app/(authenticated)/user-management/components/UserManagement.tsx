@@ -13,6 +13,7 @@ import FirmBadge from '@/components/FirmBadge';
 interface UserProfile {
   id: string;
   full_name: string;
+  employee_id: string | null;
   email: string;
   role: string;
   department: string;
@@ -681,6 +682,7 @@ export default function UserManagement() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-semibold text-slate-900">{u.full_name || 'Unknown'}</p>
+                        {u.employee_id && <span className="font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{u.employee_id}</span>}
                         <span className={`flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${rc.color}`}>
                           <RoleIcon size={9} /> {rc.label}
                         </span>
@@ -866,6 +868,7 @@ export default function UserManagement() {
                 </div>
               )}
               <div>
+                <p className="text-xs text-slate-400 mb-2">Employee ID is assigned automatically (firm code + number, e.g. MAIN001).</p>
                 <label className="text-xs font-semibold text-slate-600 mb-1 block">Job Title *</label>
                 <input value={addForm.job_title} onChange={(e) => setAddForm((f) => ({ ...f, job_title: e.target.value }))}
                   placeholder="e.g. Software Engineer" className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-300 text-slate-800" />
@@ -906,6 +909,7 @@ export default function UserManagement() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-semibold text-slate-900">{u.full_name || 'Unknown'}</p>
+                        {u.employee_id && <span className="font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{u.employee_id}</span>}
                         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${rc.color}`}>{rc.label}</span>
                         {hasPin ? (
                           <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">PIN Set</span>
@@ -1095,6 +1099,10 @@ export default function UserManagement() {
               </button>
             </div>
             <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-600 mb-1 block">Employee ID <span className="text-slate-400 font-normal">(assigned by system)</span></label>
+                <div className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2.5 bg-slate-50 text-slate-700 font-mono">{editingUser?.employee_id || '—'}</div>
+              </div>
               {[
                 { label: 'Full Name *', key: 'full_name', type: 'text' },
                 { label: 'Job Title *', key: 'job_title', type: 'text' },

@@ -17,10 +17,24 @@ interface AuditEntry {
   ip_address: string | null;
   module: string | null;
   created_at: string;
-  user_profiles?: { full_name: string; role: string };
+  user_profiles?: { full_name: string; role: string; employee_id: string | null };
 }
 
-interface UserProfile { id: string; full_name: string; }
+interface UserProfile { id: string; full_name: string; employee_id: string | null; }
+
+// Name and employee ID of whoever made the change (PIN users included).
+// Falls back to System only when the database recorded no actor.
+function actorName(e: AuditEntry): string {
+  const p = e.user_profiles;
+  if (p?.full_name) return p.full_name;
+  return e.user_id ? e.user_id.slice(0, 8) : 'System';
+}
+
+function actorLabel(e: AuditEntry): string {
+  const p = e.user_profiles;
+  if (!p?.full_name) return actorName(e);
+  return p.employee_id ? `${p.full_name} (${p.employee_id})` : p.full_name;
+}
 
 const MODULE_COLORS: Record<string, string> = {
   tasks: 'bg-blue-100 text-blue-700',
@@ -81,7 +95,7 @@ export default function AuditLogPage() {
 
   useEffect(() => {
     if (!effectiveUserId) return;
-    supabase.from('user_profiles').select('id, full_name').order('full_name').then(({ data }) => {
+    supabase.from('user_profiles').select('id, full_name, employee_id').order('full_name').then(({ data }) => {
       if (data) setUsers(data);
     });
   }, [effectiveUserId]);
@@ -92,7 +106,7 @@ export default function AuditLogPage() {
     try {
       let q = supabase
         .from('audit_log')
-        .select('*, user_profiles(full_name, role)', { count: 'exact' })
+        .select('*, user_profiles(full_name, role, employee_id)', { count: 'exact' })
         .gte('created_at', dateFrom + 'T00:00:00')
         .lte('created_at', dateTo + 'T23:59:59')
         .order('created_at', { ascending: false })
@@ -127,7 +141,8 @@ export default function AuditLogPage() {
           e.action?.toLowerCase().includes(q2) ||
           e.table_name?.toLowerCase().includes(q2) ||
           e.module?.toLowerCase().includes(q2) ||
-          (e.user_profiles as any)?.full_name?.toLowerCase().includes(q2)
+          e.user_profiles?.full_name?.toLowerCase().includes(q2) ||
+          e.user_profiles?.employee_id?.toLowerCase().includes(q2)
         );
       }
 
@@ -149,7 +164,7 @@ export default function AuditLogPage() {
     const headers = ['Timestamp', 'User', 'Action', 'Module', 'Table', 'Record ID', 'IP Address', 'Old Value', 'New Value'];
     const rows = logs.map(l => [
       fmtDT(l.created_at),
-      (l.user_profiles as any)?.full_name || l.user_id || '—',
+      actorLabel(l),
       l.action,
       l.module || l.table_name || '—',
       l.table_name,
@@ -224,7 +239,7 @@ export default function AuditLogPage() {
             <select value={userFilter} onChange={e => { setUserFilter(e.target.value); setPage(0); }}
               className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-2 outline-none focus:ring-2 focus:ring-slate-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200">
               <option value="all">All Users</option>
-              {users.map(u => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+              {users.map(u => <option key={u.id} value={u.id}>{u.employee_id ? `${u.full_name} (${u.employee_id})` : u.full_name}</option>)}
             </select>
           </div>
           <div>
@@ -248,7 +263,7 @@ export default function AuditLogPage() {
         </div>
         <div className="mt-3 relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={searchQuery} onChange={e => { setSearchQuery(e.target.value); setPage(0); }} placeholder="Search by user, action, module…"
+          <input value={searchQuery} onChange={e => { setSearchQuery(e.target.value); setPage(0); }} placeholder="Search by name, employee ID, action, module…"
             className="w-full text-sm pl-9 pr-3 py-2 border border-slate-200 dark:border-slate-600 rounded-lg outline-none focus:ring-2 focus:ring-slate-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
         </div>
       </div>
@@ -294,7 +309,12 @@ export default function AuditLogPage() {
                 {logs.map(entry => (
                   <tr key={entry.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
                     <td className="px-3 py-2.5 whitespace-nowrap text-slate-600 dark:text-slate-400 font-mono text-[11px]">{fmtDT(entry.created_at)}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap font-medium text-slate-900 dark:text-slate-100">{(entry.user_profiles as any)?.full_name || entry.user_id?.slice(0, 8) || 'System'}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <p className="font-medium text-slate-900 dark:text-slate-100">{actorName(entry)}</p>
+                      {entry.user_profiles?.employee_id && (
+                        <p className="font-mono text-[10px] text-slate-500 dark:text-slate-400">{entry.user_profiles.employee_id}</p>
+                      )}
+                    </td>
                     <td className="px-3 py-2.5 whitespace-nowrap">
                       <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${ACTION_COLORS[entry.action] || 'bg-slate-100 text-slate-600'}`}>{entry.action}</span>
                     </td>
@@ -338,7 +358,10 @@ export default function AuditLogPage() {
                 </div>
                 <div className="bg-slate-50 dark:bg-slate-700/40 rounded-lg p-3">
                   <p className="text-slate-400 mb-0.5">User</p>
-                  <p className="font-semibold text-slate-700 dark:text-slate-300">{(viewingEntry.user_profiles as any)?.full_name || viewingEntry.user_id || 'System'}</p>
+                  <p className="font-semibold text-slate-700 dark:text-slate-300">{actorName(viewingEntry)}</p>
+                  {viewingEntry.user_profiles?.employee_id && (
+                    <p className="font-mono text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{viewingEntry.user_profiles.employee_id}</p>
+                  )}
                 </div>
                 <div className="bg-slate-50 dark:bg-slate-700/40 rounded-lg p-3">
                   <p className="text-slate-400 mb-0.5">Action</p>

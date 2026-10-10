@@ -599,7 +599,7 @@ export default function EmployeeProfile() {
                   { label: 'Full Name', key: 'full_name', icon: User },
                   { label: 'Email', key: 'email', icon: Mail, disabled: true },
                   { label: 'Phone', key: 'phone', icon: Phone },
-                  { label: 'Employee ID', key: 'employee_id', icon: Briefcase },
+                  { label: 'Employee ID', key: 'employee_id', icon: Briefcase, disabled: true },
                   { label: 'Nationality', key: 'nationality', icon: Globe },
                 ].map(({ label, key, icon: FieldIcon, disabled }) => (
                   <div key={key}>

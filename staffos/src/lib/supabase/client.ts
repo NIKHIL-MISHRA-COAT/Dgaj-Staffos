@@ -78,11 +78,36 @@ if (typeof window !== 'undefined' && !(window as any).__sb_patched__) {
   };
 }
 
+// PIN sessions have no Supabase login, so the database sees them as anonymous.
+// Send the PIN user's id as x-acting-user so audit triggers can name the actor.
+// Attribution only: the server checks the id exists in user_profiles.
+const getPinActorId = (): string | null => {
+  try {
+    const raw = localStorage.getItem('dgaj_pin_session');
+    if (!raw) return null;
+    const id = JSON.parse(raw)?.userId;
+    return typeof id === 'string' && id ? id : null;
+  } catch {
+    return null;
+  }
+};
+
+const supabaseFetch: typeof fetch = (input, init) => {
+  const actor = getPinActorId();
+  if (!actor) return fetch(input, init);
+
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  if (init?.headers) new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  headers.set('x-acting-user', actor);
+  return fetch(input, { ...init, headers });
+};
+
 export function createClient() {
   return createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      global: { fetch: supabaseFetch },
       cookies: {
         getAll: () => canUseCookies() ? fromCookies() : fromStorage(),
         setAll(cookiesToSet) {

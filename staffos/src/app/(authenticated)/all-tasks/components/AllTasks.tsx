@@ -813,10 +813,11 @@ interface Row {
   collaborator: boolean;
   mine: boolean; // assigned to me or created by me (lets me ask others to join)
   invite: boolean; // someone asked me to join this task; I can accept or decline
+  collabs: { name: string; status: string }[]; // other people attached to the task (accepted or requested)
   firm_id: string | null;
 }
 
-interface UserProfile { id: string; full_name: string; role: string; department: string | null; }
+interface UserProfile { id: string; full_name: string; role: string; department: string | null; firm_id?: string | null; }
 interface Category { id: string; name: string; slug: string; color: string; }
 interface ClientOrg { id: string; name: string; }
 
@@ -1083,6 +1084,11 @@ function TaskRow({
               {names.length > 1 && <span className="ml-1 text-[10px] font-semibold text-blue-600 dark:text-blue-300">+{names.length - 1}</span>}
             </>
           )}
+          {row.collabs.length > 0 && (
+            <div className="text-[11px] font-normal text-slate-500 dark:text-slate-400 mt-0.5 max-w-[240px] truncate">
+              with {row.collabs.map(c => (c.status === 'pending' ? `${c.name} (requested)` : c.name)).join(', ')}
+            </div>
+          )}
         </td>
 
         <td className="py-3 pr-4 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
@@ -1109,6 +1115,14 @@ function TaskRow({
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <div><p className="text-slate-400">Assigned to</p><p className="font-medium text-slate-700 dark:text-slate-200">{names.join(', ') || '—'}</p></div>
+                {row.collabs.length > 0 && (
+                  <div className="col-span-2">
+                    <p className="text-slate-400">Collaborators</p>
+                    <p className="font-medium text-slate-700 dark:text-slate-200">
+                      {row.collabs.map(c => (c.status === 'pending' ? `${c.name} (requested)` : c.name)).join(', ')}
+                    </p>
+                  </div>
+                )}
                 <div><p className="text-slate-400">Assigned by</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.assigned_by || '—'}</p></div>
                 <div><p className="text-slate-400">Category</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.category || '—'}</p></div>
                 <div><p className="text-slate-400">Est. hours</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.est_hours > 0 ? `${row.est_hours}h` : '—'}</p></div>
@@ -1199,14 +1213,18 @@ function TaskRow({
 
 function CreateTaskModal({
   onClose, onCreated, users, categories, clients, uid, userName, userDept, supabase,
+  ownFirmId, firms, canPickFirm,
 }: {
   onClose: () => void; onCreated: () => void;
   users: UserProfile[]; categories: Category[]; clients: ClientOrg[];
   uid: string; userName: string; userDept: string; supabase: any;
+  ownFirmId: string | null; firms: { id: string; name: string; code: string }[]; canPickFirm: boolean;
 }) {
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
     title: '', description: '', priority: 'medium' as Priority, assignees: [uid] as string[],
+    // Defaults to the creator's own firm. Employees stay in it; directors and managers can pick a visible firm.
+    firmId: ownFirmId || '',
     due_date: '', due_time: '', recurring: '', category_id: '', client_org_id: '',
   });
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
@@ -1236,6 +1254,7 @@ function CreateTaskModal({
         assigned_to_name: picked.map(u => u.full_name).join(', ') || 'Unassigned',
         assigned_to_dept: picked[0]?.department || 'General',
         assigned_user_ids: f.assignees,
+        firm_id: f.firmId || null,
         assigned_by: uid,
         created_by: uid,
         creator_id: uid,
@@ -1306,9 +1325,33 @@ function CreateTaskModal({
             </div>
           </div>
           <div>
+            <label className={labelCls}>Firm</label>
+            {canPickFirm && firms.length > 0 ? (
+              <select
+                className={inputCls}
+                value={f.firmId}
+                onChange={e => {
+                  const firmId = e.target.value;
+                  // Drop anyone picked from another firm
+                  setF(p => ({
+                    ...p,
+                    firmId,
+                    assignees: p.assignees.filter(id => users.find(u => u.id === id)?.firm_id === firmId),
+                  }));
+                }}
+              >
+                {firms.map(fm => <option key={fm.id} value={fm.id}>{fm.name}{fm.id === ownFirmId ? ' (my firm)' : ''}</option>)}
+              </select>
+            ) : (
+              <p className="text-sm text-slate-700 dark:text-slate-200 px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                {firms.find(fm => fm.id === ownFirmId)?.name || 'My firm'}
+              </p>
+            )}
+          </div>
+          <div>
             <label className={labelCls}>Assign to (one or more)</label>
             <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
-              {users.map(u => {
+              {users.filter(u => !f.firmId || u.firm_id === f.firmId).map(u => {
                 const on = f.assignees.includes(u.id);
                 return (
                   <button
@@ -1375,6 +1418,7 @@ export default function TasksHub() {
   const [role, setRole] = useState<string | null>(null);
   const [userName, setUserName] = useState('');
   const [userDept, setUserDept] = useState('');
+  const [ownFirmId, setOwnFirmId] = useState<string | null>(null);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [clients, setClients] = useState<ClientOrg[]>([]);
@@ -1413,14 +1457,15 @@ export default function TasksHub() {
     if (!uid) return;
     (async () => {
       const [p, u, c, o] = await Promise.all([
-        supabase.from('user_profiles').select('role, full_name, department').eq('id', uid).single(),
-        supabase.from('user_profiles').select('id, full_name, role, department').order('full_name'),
+        supabase.from('user_profiles').select('role, full_name, department, firm_id').eq('id', uid).single(),
+        supabase.from('user_profiles').select('id, full_name, role, department, firm_id').order('full_name'),
         supabase.from('task_categories').select('id, name, slug, color').order('name'),
         supabase.from('client_organisations').select('id, name').order('name'),
       ]);
       setRole(p.data?.role || 'employee');
       setUserName(p.data?.full_name || '');
       setUserDept(p.data?.department || '');
+      setOwnFirmId(p.data?.firm_id || null);
       setUsers(u.data || []);
       setCategories(c.data || []);
       setClients(o.data || []);
@@ -1487,6 +1532,21 @@ export default function TasksHub() {
         __collab: collabIds.has(t.id) || !!t.__invite,
       }));
 
+      // Everyone attached to these tasks (accepted and requested), so each row can show the other names
+      const taskIdsForCollabs = list.filter(t => t.__source !== 'instance').map(t => t.id);
+      if (taskIdsForCollabs.length > 0) {
+        const cl = await supabase
+          .from('task_collaborators')
+          .select('task_id, user_id, status')
+          .in('task_id', taskIdsForCollabs.slice(0, 300));
+        const byTask: Record<string, any[]> = {};
+        (cl.data || []).forEach((c: any) => {
+          if (!byTask[c.task_id]) byTask[c.task_id] = [];
+          byTask[c.task_id].push(c);
+        });
+        list.forEach(t => { if (t.__source !== 'instance') t.__collabs = byTask[t.id] || []; });
+      }
+
       // Recurring instances (separate table). Employees: their own. Directors: everyone.
       // Managers: people in the firms they can see (sharing rule).
       let riQuery: any = supabase
@@ -1536,7 +1596,7 @@ export default function TasksHub() {
         recurring: true, frequency: t.recurring_tasks?.frequency || null,
         blocked: false, progress: 0, est_hours: 0,
         completed_at: t.completion_datetime || null, created_at: t.created_at || '', collaborator: false, firm_id: null,
-        mine: true, invite: false,
+        mine: true, invite: false, collabs: [],
       };
     }
     const ids: string[] = Array.isArray(t.assigned_user_ids) ? t.assigned_user_ids : [];
@@ -1561,6 +1621,7 @@ export default function TasksHub() {
       collaborator: !!t.__collab && !mine,
       mine: mine || uid === t.creator_id,
       invite: !!t.__invite,
+      collabs: (t.__collabs || []).map((c: any) => ({ name: userMap[c.user_id] || 'Unknown', status: c.status || 'accepted' })),
       firm_id: t.firm_id || null,
     };
   }).filter(r => r.status !== 'cancelled'), [rawTasks, userMap, catMap, catSlugMap, clientMap, uid, userName]);
@@ -1837,6 +1898,9 @@ export default function TasksHub() {
           onClose={() => setShowCreate(false)} onCreated={loadTasks}
           users={users} categories={categories} clients={clients}
           uid={uid} userName={userName} userDept={userDept} supabase={supabase}
+          ownFirmId={ownFirmId}
+          firms={visibleFirms}
+          canPickFirm={isDirector || isManager}
         />
       )}
 
