@@ -97,7 +97,13 @@ export default function DocumentsPage() {
         .order('created_at', { ascending: false });
       if (effectiveUserId) {
         const { data: visibleFirmIds } = await supabase.rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' });
-        if (visibleFirmIds) query = query.in('firm_id', visibleFirmIds);
+        if (visibleFirmIds) {
+          const ids = (visibleFirmIds as string[]).filter(Boolean);
+          // Company-wide documents (no firm set) are visible to everyone
+          query = ids.length > 0
+            ? query.or(`firm_id.is.null,firm_id.in.(${ids.join(',')})`)
+            : query.is('firm_id', null);
+        }
       }
       const { data, error } = await query;
       if (error) throw error;
@@ -108,6 +114,34 @@ export default function DocumentsPage() {
       setLoading(false);
     }
   };
+
+  // Keep the stats and list current: refresh when the tab is back in view,
+  // and when any company document is added, changed or removed
+  useEffect(() => {
+    if (!effectiveUserId) return;
+    const refresh = () => {
+      if (document.visibilityState === 'visible') fetchDocuments();
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => fetchDocuments(), 600);
+    };
+    const channel = supabase
+      .channel(`company-documents-${effectiveUserId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'company_documents' }, scheduleRefresh)
+      .subscribe();
+
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      if (debounce) clearTimeout(debounce);
+      supabase.removeChannel(channel);
+    };
+  }, [effectiveUserId]);
 
   const handleUpload = async () => {
     if (!form.title.trim() || !form.file) { toast.error('Title and file are required'); return; }
