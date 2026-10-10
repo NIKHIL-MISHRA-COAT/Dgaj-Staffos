@@ -139,14 +139,14 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
     const labelMap: Record<string, string> = {
       'nav-dashboard': t('myDashboard'),
       'nav-attendance': t('attendance'),
-      'nav-leave': t('leaveHolidays'),
+      'nav-leave': t('leaveDashboard'),
       'nav-holidays': t('holidayManagement'),
       'nav-payroll': t('payroll'),
       'nav-profile': t('myProfile'),
-      'nav-my-tasks': 'My Tasks',
-      'nav-all-tasks': 'All Tasks',
-      'nav-recurring-tasks': 'Recurring Tasks',
-      'nav-task-analytics': 'Task Analytics',
+      'nav-my-tasks': t('myTasks'),
+      'nav-all-tasks': t('allTasks'),
+      'nav-recurring-tasks': t('recurringTasks'),
+      'nav-task-analytics': t('taskAnalytics'),
       'nav-calendar': t('calendar'),
       'nav-tickets': t('ticketCentre'),
       'nav-expenses': t('expenseCentre'),
@@ -157,14 +157,14 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
       'nav-user-mgmt': t('userManagement'),
       'nav-live-map': t('liveLocations'),
       'nav-audit': t('attendanceAudit'),
-      'nav-audit-log': 'Audit Log',
-      'nav-leave-admin': 'Leave Admin',
+      'nav-audit-log': t('auditLog'),
+      'nav-leave-admin': t('leaveAdmin'),
       'nav-command-hub': t('commandHub'),
       'nav-director': t('directorPanel'),
       'nav-firm-config': t('firmConfiguration'),
       'nav-settings': t('directorSettings'),
       'nav-app-settings': t('appSettings'),
-      'nav-discrepancy': 'Client Discrepancies',
+      'nav-discrepancy': t('clientDiscrepancies'),
     };
     return labelMap[item.id] || item.label;
   };
@@ -190,7 +190,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
         <button
           onClick={onClose}
           className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-          aria-label="Close menu"
+          aria-label={t('closeMenu')}
         >
           <X size={22} className="text-slate-500 dark:text-slate-400" />
         </button>
@@ -209,7 +209,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
 
       {/* Quick access icon grid */}
       <div className="px-4 pt-4 pb-3 border-b border-slate-100 dark:border-slate-700 flex-shrink-0">
-        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-3">Quick Access</p>
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-3">{t('quickAccess')}</p>
         <div className="grid grid-cols-6 gap-2">
           {quickItems.map((item) => {
             const ItemIcon = item.icon;
@@ -242,7 +242,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
           if (items.length === 0) return null;
 
           const groupLabel = group.id === 'core' ? t('workspace')
-            : group.id === 'tasks' ? 'Tasks'
+            : group.id === 'tasks' ? t('tasksGroup')
             : group.id === 'collaborate' ? t('collaborate')
             : group.id === 'resources' ? t('resources')
             : group.id === 'management' ? t('management')
@@ -285,7 +285,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
             className="flex items-center gap-3 w-full px-3 py-3 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors"
           >
             {isIOS ? <Smartphone size={18} className="flex-shrink-0" /> : <Download size={18} className="flex-shrink-0" />}
-            <span className="text-sm font-semibold">Install App</span>
+            <span className="text-sm font-semibold">{t('installApp')}</span>
           </button>
         )}
         <button
@@ -293,7 +293,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
           className="flex items-center gap-3 w-full px-3 py-3 rounded-xl text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
         >
           <LogOut size={18} className="flex-shrink-0" />
-          <span className="text-sm font-semibold">Sign Out</span>
+          <span className="text-sm font-semibold">{t('signOut')}</span>
         </button>
       </div>
 
@@ -306,7 +306,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
                 <Smartphone size={20} className="text-blue-600" />
               </div>
               <div>
-                <p className="text-sm font-bold text-slate-900">Install DGaj Connect</p>
+                <p className="text-sm font-bold text-slate-900">{t('installDgajConnect')}</p>
                 <p className="text-xs text-slate-500">Add to your home screen</p>
               </div>
             </div>
@@ -332,7 +332,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
                 <AlertTriangle size={20} className="text-amber-600" />
               </div>
               <div>
-                <p className="text-sm font-bold text-slate-900">Sign Out During Work Hours?</p>
+                <p className="text-sm font-bold text-slate-900">{t('signOutWorkHours')}</p>
                 <p className="text-xs text-slate-500">You are currently within working hours</p>
               </div>
             </div>
@@ -344,7 +344,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
               </button>
               <button onClick={() => { setShowLogoutWarning(false); performSignOut(); }}
                 className="flex-1 py-2.5 rounded-xl bg-red-600 text-white text-sm font-semibold hover:bg-red-700 transition-colors">
-                Sign Out
+                {t('signOut')}
               </button>
             </div>
           </div>

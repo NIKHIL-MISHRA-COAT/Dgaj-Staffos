@@ -104,6 +104,12 @@ interface Firm {
   parent_firm_id: string | null;
   is_active: boolean;
   settings?: { weekly_off_days?: number[] } | null;
+  office_name?: string | null;
+  center_latitude?: number | null;
+  center_longitude?: number | null;
+  radius_meters?: number | null;
+  enforce_radius?: boolean | null;
+  block_clock_in?: boolean | null;
 }
 
 interface FirmSharing {
@@ -160,7 +166,51 @@ export default function FirmConfiguration() {
     if (isDirector) loadWeeklyRules();
   }, [isDirector, loadWeeklyRules]);
 
-  const [openSection, setOpenSection] = useState<SectionId>('working_hours');
+  const [openSections, setOpenSections] = useState<Set<SectionId>>(() => new Set());
+  const toggleSection = (id: SectionId) =>
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  const closeSection = (id: SectionId) =>
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  const updateFirmLoc = (id: string, patch: Partial<Firm>) =>
+    setFirms((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  const useCurrentLocation = (id: string) => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      toast.error('Location is not available on this device');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = Number(pos.coords.latitude.toFixed(6));
+        const lng = Number(pos.coords.longitude.toFixed(6));
+        updateFirmLoc(id, { center_latitude: lat, center_longitude: lng });
+        toast.success(`Captured ${lat}, ${lng} (accuracy ±${Math.round(pos.coords.accuracy)} m)`);
+      },
+      (err) => toast.error(err.message || 'Could not get your location'),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  };
+  const saveFirmLocation = async (f: Firm) => {
+    setSaving('location');
+    const { error } = await supabase.from('firms').update({
+      office_name: f.office_name || 'Office',
+      center_latitude: f.center_latitude ?? null,
+      center_longitude: f.center_longitude ?? null,
+      radius_meters: f.radius_meters || 200,
+      enforce_radius: !!f.enforce_radius,
+      block_clock_in: !!f.block_clock_in,
+    }).eq('id', f.id);
+    setSaving(null);
+    if (error) toast.error(error.message || 'Failed to save location');
+    else toast.success(`${f.name} location saved`, { duration: 2000 });
+  };
   const [leaveQuotas, setLeaveQuotas] = useState<LeaveQuota[]>(emptyLeaveQuotas);
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [workingHours, setWorkingHours] = useState<WorkingHoursConfig>(defaultWorkingHours);
@@ -490,7 +540,7 @@ export default function FirmConfiguration() {
     { id: 'working_hours',  label: 'Working Hours',         icon: Clock,     desc: 'Standard hours, breaks & overtime thresholds' },
     { id: 'leave',          label: 'Leave Quotas (per FY)', icon: Calendar,  desc: 'Annual leave days per role — Substitute, Paid, Unpaid, Medical, Half Day' },
     { id: 'holidays',       label: 'Public Holidays',       icon: Calendar,  desc: 'Company-wide holiday calendar' },
-    { id: 'location',       label: 'Location Radius',       icon: MapPin,    desc: 'Default GPS radius for clock-in/out enforcement' },
+    { id: 'location',       label: 'Location Radius',       icon: MapPin,    desc: 'Office location and GPS radius for each firm' },
     { id: 'financial_year', label: 'Financial Year',        icon: Briefcase, desc: 'Set the financial year start and end dates' },
     { id: 'payroll',        label: 'Payroll',               icon: Calendar,  desc: 'Set the recurring salary disbursement day shown on the Calendar' },
     { id: 'firms',          label: 'Firms & Subsidiaries',  icon: GitBranch, desc: 'Add subsidiary firms and control what data is shared between them' },
@@ -526,11 +576,14 @@ export default function FirmConfiguration() {
       <div className="space-y-3">
         {sections.map((sec) => {
           const SIcon = sec.icon;
-          const isOpen = openSection === sec.id;
+          const isOpen = openSections.has(sec.id);
           return (
             <div key={sec.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
               <button
-                onClick={() => setOpenSection(sec.id)}
+                onClick={() => toggleSection(sec.id)}
+                onDoubleClick={() => closeSection(sec.id)}
+                title="Click to open or close. Double-click to close."
+
                 className="w-full flex items-center gap-3 px-5 py-4 hover:bg-slate-50 transition-colors text-left"
               >
                 <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0">
@@ -739,72 +792,84 @@ export default function FirmConfiguration() {
                     </div>
                   )}
 
-                  {/* Location Radius */}
+                  {/* Location Radius: one office location and radius per firm */}
                   {sec.id === 'location' && (
                     <div className="space-y-4">
                       <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
                         <div className="flex items-start gap-2">
                           <MapPin size={14} className="text-blue-600 mt-0.5 flex-shrink-0" />
-                          <p className="text-xs text-blue-700">This sets the firm-wide default GPS radius. Individual employee overrides can be set from the Live Location Map page.</p>
+                          <p className="text-xs text-blue-700">Each firm has its own office location and radius. Employees are checked against their firm's office. Use the Live Location Map for an individual employee's override or to free someone who is travelling.</p>
                         </div>
                       </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div className="p-4 bg-slate-50 rounded-xl">
-                          <p className="text-xs font-semibold text-slate-600 mb-2">Office Name</p>
-                          <input type="text" value={locationRadius.office_name}
-                            onChange={(e) => setLocationRadius({ ...locationRadius, office_name: e.target.value })}
-                            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
+                      {firms.filter((f) => f.is_active).length === 0 && (
+                        <p className="text-sm text-slate-500">No active firms yet. Add one under Firms &amp; Subsidiaries.</p>
+                      )}
+                      {firms.filter((f) => f.is_active).map((f) => (
+                        <div key={f.id} className="border border-slate-200 rounded-xl p-4 space-y-4">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-sm font-semibold text-slate-800">
+                              {f.name} <span className="text-xs font-mono text-slate-500 ml-1">{f.code}</span>
+                            </p>
+                            <button onClick={() => useCurrentLocation(f.id)}
+                              className="flex items-center gap-1.5 text-xs font-semibold text-violet-700 bg-violet-50 hover:bg-violet-100 px-3 py-2 rounded-lg transition-colors">
+                              <MapPin size={12} /> Use my current location
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="p-3 bg-slate-50 rounded-xl">
+                              <p className="text-xs font-semibold text-slate-600 mb-2">Office Name</p>
+                              <input type="text" value={f.office_name ?? ''} placeholder="Office"
+                                onChange={(e) => updateFirmLoc(f.id, { office_name: e.target.value })}
+                                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
+                            </div>
+                            <div className="p-3 bg-slate-50 rounded-xl">
+                              <p className="text-xs font-semibold text-slate-600 mb-2">Radius (meters)</p>
+                              <input type="number" min={50} max={5000} value={f.radius_meters ?? 200}
+                                onChange={(e) => updateFirmLoc(f.id, { radius_meters: parseInt(e.target.value) || 200 })}
+                                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
+                            </div>
+                            <div className="p-3 bg-slate-50 rounded-xl">
+                              <p className="text-xs font-semibold text-slate-600 mb-2">Latitude</p>
+                              <input type="number" step="0.000001" value={f.center_latitude ?? ''} placeholder="e.g. 19.076090"
+                                onChange={(e) => updateFirmLoc(f.id, { center_latitude: e.target.value === '' ? null : parseFloat(e.target.value) })}
+                                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
+                            </div>
+                            <div className="p-3 bg-slate-50 rounded-xl">
+                              <p className="text-xs font-semibold text-slate-600 mb-2">Longitude</p>
+                              <input type="number" step="0.000001" value={f.center_longitude ?? ''} placeholder="e.g. 72.877426"
+                                onChange={(e) => updateFirmLoc(f.id, { center_longitude: e.target.value === '' ? null : parseFloat(e.target.value) })}
+                                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                            <div>
+                              <p className="text-sm font-semibold text-slate-800">Enforce Radius on Clock-In</p>
+                              <p className="text-xs text-slate-500 mt-0.5">Warn employees and notify director when clocking in outside the radius</p>
+                            </div>
+                            <button onClick={() => updateFirmLoc(f.id, { enforce_radius: !f.enforce_radius })}
+                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${f.enforce_radius ? 'bg-violet-600' : 'bg-slate-300'}`}>
+                              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${f.enforce_radius ? 'translate-x-6' : 'translate-x-1'}`} />
+                            </button>
+                          </div>
+                          <div className="flex items-center justify-between p-3 bg-red-50 border border-red-200 rounded-xl">
+                            <div>
+                              <p className="text-sm font-semibold text-red-800">Block Clock-In Outside Radius</p>
+                              <p className="text-xs text-red-600 mt-0.5">Hard block — employees cannot clock in outside the radius</p>
+                            </div>
+                            <button onClick={() => updateFirmLoc(f.id, { block_clock_in: !f.block_clock_in })}
+                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${f.block_clock_in ? 'bg-red-600' : 'bg-slate-300'}`}>
+                              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${f.block_clock_in ? 'translate-x-6' : 'translate-x-1'}`} />
+                            </button>
+                          </div>
+                          <div className="flex justify-end">
+                            <button onClick={() => saveFirmLocation(f)} disabled={saving === 'location'}
+                              className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">
+                              {saving === 'location' ? <Loader2 size={13} className="animate-spin" /> : <Save size={14} />}
+                              Save {f.name} Location
+                            </button>
+                          </div>
                         </div>
-                        <div className="p-4 bg-slate-50 rounded-xl">
-                          <p className="text-xs font-semibold text-slate-600 mb-2">Default Radius (meters)</p>
-                          <input type="number" min={50} max={5000} value={locationRadius.default_radius_meters}
-                            onChange={(e) => setLocationRadius({ ...locationRadius, default_radius_meters: parseInt(e.target.value) || 200 })}
-                            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
-                        </div>
-                        <div className="p-4 bg-slate-50 rounded-xl">
-                          <p className="text-xs font-semibold text-slate-600 mb-2">Office Latitude</p>
-                          <input type="number" step="0.000001" value={locationRadius.center_latitude}
-                            onChange={(e) => setLocationRadius({ ...locationRadius, center_latitude: parseFloat(e.target.value) || 0 })}
-                            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
-                        </div>
-                        <div className="p-4 bg-slate-50 rounded-xl">
-                          <p className="text-xs font-semibold text-slate-600 mb-2">Office Longitude</p>
-                          <input type="number" step="0.000001" value={locationRadius.center_longitude}
-                            onChange={(e) => setLocationRadius({ ...locationRadius, center_longitude: parseFloat(e.target.value) || 0 })}
-                            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white" />
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-800">Enforce Radius on Clock-In</p>
-                          <p className="text-xs text-slate-500 mt-0.5">Warn employees and notify director when clocking in outside the allowed radius</p>
-                        </div>
-                        <button
-                          onClick={() => setLocationRadius({ ...locationRadius, enforce_radius: !locationRadius.enforce_radius })}
-                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${locationRadius.enforce_radius ? 'bg-violet-600' : 'bg-slate-300'}`}
-                        >
-                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${locationRadius.enforce_radius ? 'translate-x-6' : 'translate-x-1'}`} />
-                        </button>
-                      </div>
-                      <div className="flex items-center justify-between p-4 bg-red-50 border border-red-200 rounded-xl">
-                        <div>
-                          <p className="text-sm font-semibold text-red-800">Block Clock-In Outside Radius</p>
-                          <p className="text-xs text-red-600 mt-0.5">Hard block — employees cannot clock in if outside the allowed radius (prevents location fraud)</p>
-                        </div>
-                        <button
-                          onClick={() => setLocationRadius({ ...locationRadius, block_clock_in: !locationRadius.block_clock_in })}
-                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0 ${locationRadius.block_clock_in ? 'bg-red-600' : 'bg-slate-300'}`}
-                        >
-                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${locationRadius.block_clock_in ? 'translate-x-6' : 'translate-x-1'}`} />
-                        </button>
-                      </div>
-                      <div className="flex justify-end">
-                        <button onClick={() => handleSave('location')} disabled={saving === 'location'}
-                          className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-60 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">
-                          {saving === 'location' ? <Loader2 size={13} className="animate-spin" /> : <Save size={14} />}
-                          {saving === 'location' ? 'Saving…' : 'Save Location Settings'}
-                        </button>
-                      </div>
+                      ))}
                     </div>
                   )}
 

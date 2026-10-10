@@ -33,7 +33,7 @@ const navItems: NavItem[] = [
   { id: 'nav-payroll', label: 'Payroll', icon: Wallet, href: '/payroll', group: 'core' },
   { id: 'nav-profile', label: 'My Profile', icon: UserCircle, href: '/employee-profile', group: 'core' },
 
-  // { id: 'nav-my-tasks', label: 'My Tasks', icon: ListTodo, href: '/my-tasks', group: 'tasks' },
+  // { id: 'nav-my-tasks', label: 'My Tasks', icon: ListTodo, href: '/all-tasks', group: 'tasks' },
   { id: 'nav-all-tasks', label: 'All Tasks', icon: CheckSquare, href: '/all-tasks', group: 'tasks' },
   { id: 'nav-task-analytics', label: 'Task Analytics', icon: PieChart, href: '/task-analytics', group: 'tasks', managerOnly: true },
   { id: 'nav-recurring-tasks', label: 'Recurring Tasks', icon: Repeat, href: '/recurring-tasks', group: 'tasks' },
@@ -45,7 +45,7 @@ const navItems: NavItem[] = [
   { id: 'nav-discrepancy', label: 'Client Discrepancies', icon: AlertTriangle, href: '/client-discrepancy-reports', group: 'collaborate' },
 
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
-  { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'resources' , managerOnly: true},
+  { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'resources', managerOnly: true },
   { id: 'nav-audit-log', label: 'Audit Log', icon: ScrollText, href: '/audit-log', group: 'resources' },
   { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'resources', managerOnly: true },
   { id: 'nav-user-mgmt', label: 'User Management', icon: UserCog, href: '/user-management', group: 'resources', managerOnly: true },
@@ -188,10 +188,10 @@ export default function Sidebar({ activePath, onClose }: SidebarProps) {
           });
 
           const groupLabel = group.id === 'core' ? t('workspace')
-            : group.id === 'tasks' ? 'Tasks'
+            : group.id === 'tasks' ? t('tasksGroup')
             : group.id === 'collaborate' ? t('collaborate')
             : group.id === 'resources' ? t('resources')
-            : 'Director Only';
+            : t('directorOnly');
 
           // Nothing this role can see in this group — don't show a dangling
           // empty category header (e.g. "Director Only" for an employee).
@@ -237,8 +237,13 @@ export default function Sidebar({ activePath, onClose }: SidebarProps) {
                   : item.id === 'nav-tickets-mgmt' ? t('ticketCentre')
                   : item.id === 'nav-live-map' ? t('liveLocations')
                   : item.id === 'nav-audit' ? t('attendanceAudit')
-                  : item.id === 'nav-audit-log' ? 'Audit Log'
-                  : item.id === 'nav-leave-admin' ? 'Leave Admin'
+                  : item.id === 'nav-audit-log' ? t('auditLog')
+                  : item.id === 'nav-leave-admin' ? t('leaveAdmin')
+                  : item.id === 'nav-task-analytics' ? t('taskAnalytics')
+                  : item.id === 'nav-discrepancy' ? t('clientDiscrepancies')
+                  : item.id === 'nav-firm-reports' ? t('firmReports')
+                  : item.id === 'nav-all-tasks' ? t('allTasks')
+                  : item.id === 'nav-recurring-tasks' ? t('recurringTasks')
                   : item.id === 'nav-command-hub' ? t('commandHub')
                   : item.id === 'nav-director' ? t('directorPanel')
                   : item.id === 'nav-firm-config' ? t('firmConfiguration')

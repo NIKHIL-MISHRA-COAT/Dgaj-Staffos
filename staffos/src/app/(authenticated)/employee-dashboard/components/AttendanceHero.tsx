@@ -136,7 +136,7 @@ export default function AttendanceHero() {
           .single(),
         supabase
           .from('user_profiles')
-          .select('travel_approved')
+          .select('travel_approved, firms!firm_id(office_name, center_latitude, center_longitude, radius_meters, enforce_radius, block_clock_in)')
           .eq('id', effectiveId)
           .single(),
         supabase
@@ -159,16 +159,29 @@ export default function AttendanceHero() {
         }
       }
 
+      // Priority: personal override (location_settings) > the employee's firm office > director default
+      const firmRow: any = (profileRes.data as any)?.firms;
+      const hasFirmOffice = !!(firmRow?.center_latitude && firmRow?.center_longitude);
+
       if (settingRes.data) {
         // Merge firm-level enforce_radius / block_clock_in from director_settings if present
         const firmLoc = firmSettingRes.data?.setting_value as any;
         setLocationSetting({
           ...settingRes.data as LocationSetting,
-          enforce_radius: firmLoc?.enforce_radius ?? settingRes.data.enforce_radius ?? false,
-          block_clock_in: firmLoc?.block_clock_in ?? settingRes.data.block_clock_in ?? false,
+          enforce_radius: firmRow?.enforce_radius ?? firmLoc?.enforce_radius ?? settingRes.data.enforce_radius ?? false,
+          block_clock_in: firmRow?.block_clock_in ?? firmLoc?.block_clock_in ?? settingRes.data.block_clock_in ?? false,
+        });
+      } else if (hasFirmOffice) {
+        setLocationSetting({
+          center_latitude: firmRow.center_latitude,
+          center_longitude: firmRow.center_longitude,
+          radius_meters: firmRow.radius_meters || 200,
+          office_name: firmRow.office_name || 'Office',
+          enforce_radius: firmRow.enforce_radius ?? false,
+          block_clock_in: firmRow.block_clock_in ?? false,
         });
       } else if (firmSettingRes.data?.setting_value) {
-        // No per-user setting — use firm default
+        // No per-user setting and no firm office — use director default
         const firmLoc = firmSettingRes.data.setting_value as any;
         if (firmLoc?.center_latitude && firmLoc?.center_longitude && firmLoc?.default_radius_meters) {
           setLocationSetting({
