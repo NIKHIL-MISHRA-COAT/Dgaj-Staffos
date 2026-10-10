@@ -417,8 +417,8 @@ export default function ChatPage() {
     }
   };
 
-  // Only managers and employees create channels
-  const canCreateChannel = currentUser?.role === 'manager' || currentUser?.role === 'employee';
+  // Directors, managers and employees can create channels
+  const canCreateChannel = ['director', 'manager', 'employee'].includes(currentUser?.role || '');
 
   const filteredChannels = channels.filter(c =>
     !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase())
