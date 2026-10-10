@@ -103,7 +103,11 @@ export default function ChatPage() {
       let channelsQuery = supabase.from('chat_channels').select('*').eq('is_archived', false).order('created_at');
       if (visibleFirmIds) {
         usersQuery = usersQuery.in('firm_id', visibleFirmIds);
-        channelsQuery = channelsQuery.in('firm_id', visibleFirmIds);
+        const ids = (visibleFirmIds as string[]).join(',');
+        // Company-wide channels (no firm) stay visible to everyone
+        channelsQuery = ids
+          ? channelsQuery.or(`firm_id.in.(${ids}),firm_id.is.null`)
+          : channelsQuery.is('firm_id', null);
       }
 
       const [profileRes, usersRes, channelsRes] = await Promise.all([
@@ -113,6 +117,10 @@ export default function ChatPage() {
       ]);
       if (profileRes.data) setCurrentUser(profileRes.data);
       if (usersRes.data) setUsers(usersRes.data);
+      if (channelsRes.error) {
+        console.error('Channel load error:', channelsRes.error);
+        toast.error(`Could not load channels: ${channelsRes.error.message}`);
+      }
       if (channelsRes.data) {
         setChannels(channelsRes.data);
         if (channelsRes.data.length > 0) {
@@ -181,18 +189,34 @@ export default function ChatPage() {
   const loadMessages = async (channelId: string) => {
     setLoadingMessages(true);
     try {
+      // Load messages first. The reply lookup is separate, so the channel still
+      // loads even if the reply relationship is missing from the API schema cache.
       const { data, error } = await supabase
         .from('chat_messages')
         .select(`
           *,
-          sender:user_profiles!chat_messages_sender_id_fkey(full_name, role, department),
-          reply_to:chat_messages!chat_messages_reply_to_id_fkey(content, sender:user_profiles!chat_messages_sender_id_fkey(full_name))
+          sender:user_profiles!chat_messages_sender_id_fkey(full_name, role, department)
         `)
         .eq('channel_id', channelId)
         .order('created_at', { ascending: true })
         .limit(100);
       if (error) throw error;
-      setMessages(data || []);
+
+      const rows = (data || []) as any[];
+      const replyIds = Array.from(new Set(rows.map((r) => r.reply_to_id).filter(Boolean))) as string[];
+      const replyMap = new Map<string, { content: string; sender?: { full_name: string } }>();
+      if (replyIds.length > 0) {
+        const { data: replies } = await supabase
+          .from('chat_messages')
+          .select('id, content, sender:user_profiles!chat_messages_sender_id_fkey(full_name)')
+          .in('id', replyIds);
+        (replies || []).forEach((r: any) => replyMap.set(r.id, { content: r.content, sender: r.sender }));
+      }
+
+      setMessages(rows.map((r) => ({
+        ...r,
+        reply_to: r.reply_to_id ? replyMap.get(r.reply_to_id) : undefined,
+      })));
     } catch (err: any) {
       console.error('Load messages error:', err);
       toast.error(err.message || 'Failed to load messages for this channel');
