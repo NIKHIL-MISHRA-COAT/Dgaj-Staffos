@@ -812,6 +812,7 @@ interface Row {
   created_at: string;
   collaborator: boolean;
   mine: boolean; // assigned to me or created by me (lets me ask others to join)
+  invite: boolean; // someone asked me to join this task; I can accept or decline
   firm_id: string | null;
 }
 
@@ -990,12 +991,13 @@ interface TaskRowProps {
   onStatus: (s: TaskStatus) => void;
   onDelete: () => void;
   onRequest: (userId: string) => Promise<boolean>;
+  onRespond: (accept: boolean) => void;
 }
 
 /* One table row. Click the row to open the description; click again to close. */
 function TaskRow({
   row, today, expanded, busy, showAssignee, firm, canDelete, candidates,
-  onToggle, onComplete, onStatus, onDelete, onRequest,
+  onToggle, onComplete, onStatus, onDelete, onRequest, onRespond,
 }: TaskRowProps) {
   const [pick, setPick] = useState('');
   const [sending, setSending] = useState(false);
@@ -1050,6 +1052,9 @@ function TaskRow({
             {row.recurring && <Repeat size={11} className="text-purple-500 flex-shrink-0" />}
             {row.blocked && row.status !== 'blocked' && <Flag size={11} className="text-red-500 flex-shrink-0" />}
             {row.collaborator && <Users size={11} className="text-indigo-500 flex-shrink-0" />}
+            {row.invite && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Invite</span>
+            )}
           </div>
           {(row.client || row.category || (showAssignee && firm)) && (
             <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 flex-wrap">
@@ -1128,6 +1133,26 @@ function TaskRow({
                 </div>
               ) : (
                 <p className="text-xs text-slate-400">Recurring instance — tick the circle to mark it done.</p>
+              )}
+
+              {row.invite && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">You have been asked to join this task.</span>
+                  <button
+                    onClick={() => onRespond(true)}
+                    disabled={busy}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium disabled:opacity-50"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    onClick={() => onRespond(false)}
+                    disabled={busy}
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 text-xs font-medium text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                  >
+                    Decline
+                  </button>
+                </div>
               )}
 
               {canRequest && (
@@ -1359,9 +1384,9 @@ export default function TasksHub() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
-  // The "My Tasks" option is gone from this tab. Directors and managers always get the
-  // list for the firms they can see; employees only see their own tasks (effectiveScope).
-  const scope: Scope = 'all';
+  // Directors and managers can switch between their own tasks and the firm-scoped list.
+  // Employees only ever see their own tasks (effectiveScope).
+  const [scope, setScope] = useState<Scope>('all');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [quick, setQuick] = useState<Quick>('none');
   const [search, setSearch] = useState('');
@@ -1449,7 +1474,18 @@ export default function TasksHub() {
         }
       }
 
-      const list: any[] = Array.from(rows.values()).map(t => ({ ...t, __collab: collabIds.has(t.id) }));
+      // Collaboration requests waiting for me to accept or decline (shown to the invitee in All Tasks)
+      const inv = await supabase.from('task_collaborators').select('task_id').eq('user_id', uid).eq('status', 'pending');
+      const invIds = (inv.data || []).map((l: any) => l.task_id);
+      if (invIds.length > 0) {
+        const r4 = await supabase.from('tasks').select(TASK_COLS).in('id', invIds).limit(200);
+        if (!r4.error) (r4.data || []).forEach((t: any) => rows.set(t.id, { ...t, __source: 'task', __invite: true }));
+      }
+
+      const list: any[] = Array.from(rows.values()).map(t => ({
+        ...t,
+        __collab: collabIds.has(t.id) || !!t.__invite,
+      }));
 
       // Recurring instances (separate table). Employees: their own. Directors: everyone.
       // Managers: people in the firms they can see (sharing rule).
@@ -1458,7 +1494,7 @@ export default function TasksHub() {
         .select('*, recurring_tasks(title, frequency)')
         .order('due_date', { ascending: false })
         .limit(500);
-      if (!canToggleScope) {
+      if (!canToggleScope || scope === 'mine') {
         riQuery = riQuery.eq('assigned_to', uid);
       } else if (!isDirector) {
         const { data: fids } = await supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'tasks' });
@@ -1500,7 +1536,7 @@ export default function TasksHub() {
         recurring: true, frequency: t.recurring_tasks?.frequency || null,
         blocked: false, progress: 0, est_hours: 0,
         completed_at: t.completion_datetime || null, created_at: t.created_at || '', collaborator: false, firm_id: null,
-        mine: true,
+        mine: true, invite: false,
       };
     }
     const ids: string[] = Array.isArray(t.assigned_user_ids) ? t.assigned_user_ids : [];
@@ -1524,6 +1560,7 @@ export default function TasksHub() {
       completed_at: t.completed_at || null, created_at: t.created_at || '',
       collaborator: !!t.__collab && !mine,
       mine: mine || uid === t.creator_id,
+      invite: !!t.__invite,
       firm_id: t.firm_id || null,
     };
   }).filter(r => r.status !== 'cancelled'), [rawTasks, userMap, catMap, catSlugMap, clientMap, uid, userName]);
@@ -1762,8 +1799,29 @@ export default function TasksHub() {
     }
   };
 
+  // Respond to a collaboration request addressed to me
+  const respondInvite = async (row: Row, accept: boolean) => {
+    if (!uid) return;
+    setBusyKey(row.key);
+    try {
+      const { error } = await supabase
+        .from('task_collaborators')
+        .update(accept ? { status: 'accepted', accepted_at: new Date().toISOString() } : { status: 'declined' })
+        .eq('task_id', row.id)
+        .eq('user_id', uid);
+      if (error) throw error;
+      toast.success(accept ? 'You joined the task' : 'Request declined');
+      await loadTasks();
+    } catch (err: any) {
+      toast.error(err?.message || 'Could not update the request');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const scopeSubtitle =
     !canToggleScope ? 'Your tasks'
+      : scope === 'mine' ? 'Tasks assigned to you'
       : isDirector ? 'Every task across all firms'
       : 'Tasks in the firms you can see';
 
@@ -1807,6 +1865,16 @@ export default function TasksHub() {
 
           {/* Toggles */}
           <div className="flex items-center gap-3 mt-4 flex-wrap">
+            {canToggleScope && (
+              <Segmented<Scope>
+                value={scope}
+                onChange={v => { setScope(v); setExpanded(null); setAssigneeF('all'); setFirmF('all'); }}
+                options={[
+                  { value: 'mine', label: 'My Tasks', icon: User },
+                  { value: 'all', label: isDirector ? 'All Tasks · All Firms' : 'All Tasks · My Firms', icon: Users },
+                ]}
+              />
+            )}
             <Segmented<TypeFilter>
               value={typeFilter}
               onChange={setTypeFilter}
@@ -1962,6 +2030,7 @@ export default function TasksHub() {
                           onStatus={s => changeStatus(r, s)}
                           onDelete={() => deleteTask(r)}
                           onRequest={userId => requestCollaborator(r, userId)}
+                          onRespond={accept => respondInvite(r, accept)}
                         />
                       ))}
                     </React.Fragment>
