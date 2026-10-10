@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Users, UserPlus, Crown, Briefcase, Search, Shield, X, Check, AlertCircle, RefreshCw, KeyRound, Eye, EyeOff, Plane, Edit2, Trash2, ClipboardList, Save, History } from 'lucide-react';
+import { Users, UserPlus, Crown, Briefcase, Search, Shield, X, Check, AlertCircle, RefreshCw, KeyRound, Eye, EyeOff, Plane, Edit2, Trash2, ClipboardList, Save, History, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 import { Toaster } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
@@ -101,6 +101,8 @@ export default function UserManagement() {
 
   // View user details
   const [viewingUser, setViewingUser] = useState<UserProfile | null>(null);
+  // Documents modal (request / review employee documents)
+  const [docsUser, setDocsUser] = useState<UserProfile | null>(null);
 
   // Audit log
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -699,6 +701,11 @@ export default function UserManagement() {
                       <p className="text-xs text-slate-500 truncate">{u.email} · {u.job_title || '—'} · {u.department || '—'}</p>
                     </div>
                     <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap justify-end">
+                      {/* Documents: request from employee / review uploads */}
+                      <button onClick={() => setDocsUser(u)} title="Documents"
+                        className="p-1.5 rounded-lg hover:bg-violet-50 text-slate-400 hover:text-violet-600 transition-colors">
+                        <FileText size={14} />
+                      </button>
                       {/* View Details */}
                       <button onClick={() => setViewingUser(u)} title="View Details"
                         className="p-1.5 rounded-lg hover:bg-blue-50 text-slate-400 hover:text-blue-600 transition-colors">
@@ -1074,11 +1081,6 @@ export default function UserManagement() {
                   </div>
                 ))}
               </div>
-              <EmployeeDocumentsPanel
-                employeeId={viewingUser.id}
-                employeeName={viewingUser.full_name}
-                requesterId={getEffectiveUserId() || ''}
-              />
               <div className="flex gap-2 pt-2">
                 <button onClick={() => { setViewingUser(null); openEditUser(viewingUser); }}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-600 transition-colors">
@@ -1089,6 +1091,30 @@ export default function UserManagement() {
                   <History size={14} /> View Audit
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Documents Modal */}
+      {docsUser && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 sticky top-0 bg-white rounded-t-2xl">
+              <div>
+                <h3 className="text-base font-700 text-slate-900">Documents</h3>
+                <p className="text-xs text-slate-500">{docsUser.full_name}{docsUser.employee_id ? ` · ${docsUser.employee_id}` : ''}</p>
+              </div>
+              <button onClick={() => setDocsUser(null)} className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors">
+                <X size={18} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="px-6 py-5">
+              <EmployeeDocumentsPanel
+                employeeId={docsUser.id}
+                employeeName={docsUser.full_name}
+                requesterId={getEffectiveUserId() || ''}
+              />
             </div>
           </div>
         </div>
