@@ -13,6 +13,8 @@ interface Channel {
   channel_type: string;
   department: string | null;
   created_by: string | null;
+  scope?: 'company' | 'firm' | 'people';
+  firm_id?: string | null;
   is_archived: boolean;
   created_at: string;
   unread_count?: number;
@@ -42,6 +44,16 @@ interface UserProfile {
   role: string;
   department: string;
   job_title?: string;
+}
+
+interface NewChannelForm {
+  name: string;
+  description: string;
+  channel_type: string;
+  department: string;
+  scope: 'firm' | 'people';
+  target_firm_id: string;
+  member_ids: string[];
 }
 
 const EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🎉', '🔥', '✅'];
@@ -85,7 +97,10 @@ export default function ChatPage() {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState<string | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
-  const [newChannelForm, setNewChannelForm] = useState({ name: '', description: '', channel_type: 'general', department: '' });
+  const emptyChannelForm: NewChannelForm = { name: '', description: '', channel_type: 'general', department: '', scope: 'firm', target_firm_id: '', member_ids: [] };
+  const [newChannelForm, setNewChannelForm] = useState<NewChannelForm>(emptyChannelForm);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [firmOptions, setFirmOptions] = useState<{ id: string; name: string; code: string }[]>([]);
 
   const uid = effectiveUserId;
 
@@ -97,26 +112,44 @@ export default function ChatPage() {
   const loadInitialData = async () => {
     setLoading(true);
     try {
-      const { data: visibleFirmIds } = uid ? await supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'chat' }) : { data: null };
+      const [profileRes, visibleRes] = await Promise.all([
+        supabase.from('user_profiles').select('id, full_name, role, department, job_title, firm_id').eq('id', uid!).single(),
+        supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'chat' }),
+      ]);
+      const role = profileRes.data?.role || '';
+      const visibleFirmIds = (visibleRes.data as string[] | null) || null;
+      const isDirectorUser = role === 'director';
 
       let usersQuery = supabase.from('user_profiles').select('id, full_name, role, department, job_title, firm_id').order('full_name');
+      if (visibleFirmIds) usersQuery = usersQuery.in('firm_id', visibleFirmIds);
+
+      // Channels: company-wide, channels of your firm, and channels you were added to.
+      // Directors see every channel.
       let channelsQuery = supabase.from('chat_channels').select('*').eq('is_archived', false).order('created_at');
-      if (visibleFirmIds) {
-        usersQuery = usersQuery.in('firm_id', visibleFirmIds);
-        const ids = (visibleFirmIds as string[]).join(',');
-        // Company-wide channels (no firm) stay visible to everyone
-        channelsQuery = ids
-          ? channelsQuery.or(`firm_id.in.(${ids}),firm_id.is.null`)
-          : channelsQuery.is('firm_id', null);
+      if (!isDirectorUser) {
+        const [memberRes] = await Promise.all([
+          supabase.from('chat_channel_members').select('channel_id').eq('user_id', uid!),
+        ]);
+        const memberIds = (memberRes.data || []).map((r: any) => r.channel_id as string);
+        const clauses = ['scope.eq.company', `created_by.eq.${uid}`];
+        if (visibleFirmIds && visibleFirmIds.length > 0) {
+          clauses.push(`and(scope.eq.firm,firm_id.in.(${visibleFirmIds.join(',')}))`);
+        }
+        if (memberIds.length > 0) clauses.push(`id.in.(${memberIds.join(',')})`);
+        channelsQuery = channelsQuery.or(clauses.join(','));
       }
 
-      const [profileRes, usersRes, channelsRes] = await Promise.all([
-        supabase.from('user_profiles').select('id, full_name, role, department, job_title').eq('id', uid!).single(),
+      const [usersRes, firmsRes, channelsRes] = await Promise.all([
         usersQuery,
+        supabase.from('firms').select('id, name, code').eq('is_active', true).order('name'),
         channelsQuery,
       ]);
-      if (profileRes.data) setCurrentUser(profileRes.data);
+
+      if (profileRes.data) setCurrentUser(profileRes.data as UserProfile);
       if (usersRes.data) setUsers(usersRes.data);
+      if (firmsRes.data) {
+        setFirmOptions(firmsRes.data.filter((f: any) => !visibleFirmIds || visibleFirmIds.includes(f.id)));
+      }
       if (channelsRes.error) {
         console.error('Channel load error:', channelsRes.error);
         toast.error(`Could not load channels: ${channelsRes.error.message}`);
@@ -339,22 +372,38 @@ export default function ChatPage() {
   };
 
   const handleCreateChannel = async () => {
-    if (!newChannelForm.name.trim() || !uid) return;
+    const f = newChannelForm;
+    if (!f.name.trim() || !uid) return;
+    if (f.scope === 'firm' && !f.target_firm_id) { toast.error('Select a firm'); return; }
+    if (f.scope === 'people' && f.member_ids.length === 0) { toast.error('Select at least one employee'); return; }
     try {
       const { data: creatorProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', uid).single();
       const { data, error } = await supabase.from('chat_channels').insert({
-        name: newChannelForm.name.trim(),
-        description: newChannelForm.description,
-        channel_type: newChannelForm.channel_type,
-        department: newChannelForm.department || null,
-        firm_id: creatorProfile?.firm_id || null,
+        name: f.name.trim(),
+        description: f.description,
+        channel_type: f.channel_type,
+        department: f.department || null,
+        scope: f.scope,
+        firm_id: f.scope === 'firm' ? f.target_firm_id : (creatorProfile?.firm_id || null),
         created_by: uid,
       }).select().single();
       if (error) throw error;
+
+      if (f.scope === 'people') {
+        const memberRows = Array.from(new Set([uid, ...f.member_ids])).map((user_id) => ({
+          channel_id: data.id,
+          user_id,
+          role: user_id === uid ? 'admin' : 'member',
+        }));
+        const { error: memberErr } = await supabase.from('chat_channel_members').insert(memberRows);
+        if (memberErr) throw memberErr;
+      }
+
       setChannels(prev => [...prev, data]);
       setActiveChannel(data);
       setShowNewChannel(false);
-      setNewChannelForm({ name: '', description: '', channel_type: 'general', department: '' });
+      setNewChannelForm(emptyChannelForm);
+      setMemberSearch('');
       toast.success('Channel created');
     } catch (err: any) {
       toast.error(err.message || 'Failed to create channel');
@@ -368,7 +417,8 @@ export default function ChatPage() {
     }
   };
 
-  const isDirectorOrManager = currentUser?.role === 'director' || currentUser?.role === 'manager' || currentUser?.role === 'executive';
+  // Only managers and employees create channels
+  const canCreateChannel = currentUser?.role === 'manager' || currentUser?.role === 'employee';
 
   const filteredChannels = channels.filter(c =>
     !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -400,7 +450,7 @@ export default function ChatPage() {
               <MessageSquare size={18} className="text-blue-600" />
               <h2 className="text-sm font-700 text-slate-900 dark:text-slate-100">Channels</h2>
             </div>
-            {isDirectorOrManager && (
+            {canCreateChannel && (
               <button onClick={() => setShowNewChannel(true)}
                 className="p-1.5 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors">
                 <Plus size={16} className="text-slate-600 dark:text-slate-400" />
@@ -691,6 +741,70 @@ export default function ChatPage() {
                   <option value="announcement">Announcement</option>
                 </select>
               </div>
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Visible to *</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'firm', label: 'A firm' },
+                    { id: 'people', label: 'Selected employees' },
+                  ] as const).map((o) => (
+                    <button key={o.id} type="button"
+                      onClick={() => setNewChannelForm(p => ({ ...p, scope: o.id }))}
+                      className={`py-2 rounded-xl border text-xs font-600 transition-colors ${newChannelForm.scope === o.id ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-400'}`}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {newChannelForm.scope === 'firm' && (
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Firm *</label>
+                  <select value={newChannelForm.target_firm_id}
+                    onChange={e => setNewChannelForm(p => ({ ...p, target_firm_id: e.target.value }))}
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400">
+                    <option value="">Select firm…</option>
+                    {firmOptions.map((f) => (
+                      <option key={f.id} value={f.id}>{f.name} ({f.code})</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500 mt-1">Everyone in this firm will see the channel.</p>
+                </div>
+              )}
+              {newChannelForm.scope === 'people' && (
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Employees * ({newChannelForm.member_ids.length} selected)</label>
+                  <input type="text" placeholder="Search by name or firm…" value={memberSearch}
+                    onChange={e => setMemberSearch(e.target.value)}
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2 mb-2 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                  <div className="max-h-48 overflow-y-auto border border-slate-200 dark:border-slate-600 rounded-xl divide-y divide-slate-100 dark:divide-slate-700">
+                    {users
+                      .filter((u) => u.id !== uid)
+                      .filter((u) => {
+                        const q = memberSearch.trim().toLowerCase();
+                        if (!q) return true;
+                        const firm = firmOptions.find((f) => f.id === (u as any).firm_id)?.name || '';
+                        return u.full_name.toLowerCase().includes(q) || firm.toLowerCase().includes(q);
+                      })
+                      .map((u) => {
+                        const checked = newChannelForm.member_ids.includes(u.id);
+                        const firm = firmOptions.find((f) => f.id === (u as any).firm_id)?.name;
+                        return (
+                          <label key={u.id} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700">
+                            <input type="checkbox" checked={checked}
+                              onChange={() => setNewChannelForm(p => ({
+                                ...p,
+                                member_ids: checked ? p.member_ids.filter((id) => id !== u.id) : [...p.member_ids, u.id],
+                              }))}
+                              className="accent-blue-600" />
+                            <span className="text-sm text-slate-800 dark:text-slate-200">{u.full_name}</span>
+                            {firm && <span className="text-xs text-slate-500 ml-auto">{firm}</span>}
+                          </label>
+                        );
+                      })}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-1">Only the people you pick (and you) will see this channel.</p>
+                </div>
+              )}
             </div>
             <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700">
               <button onClick={() => setShowNewChannel(false)}
