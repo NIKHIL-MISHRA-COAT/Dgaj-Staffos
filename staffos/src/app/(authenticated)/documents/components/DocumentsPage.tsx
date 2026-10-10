@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Upload, Search, Download, Trash2, Eye, X, FileText, Image, File, Loader2, FolderOpen } from 'lucide-react';
+import { BookOpen, Upload, Search, Download, Trash2, Eye, X, FileText, Image, File, Loader2, FolderOpen, Pencil } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
@@ -21,6 +21,9 @@ interface CompanyDocument {
   uploaded_by: string | null;
   created_at: string;
   uploader?: { full_name: string };
+  visibility?: string | null;
+  shared_departments?: string[] | null;
+  shared_user_ids?: string[] | null;
 }
 
 const DOC_TYPES = ['All', 'policy', 'form', 'template', 'report', 'general'];
@@ -51,6 +54,59 @@ function getFileIcon(mimeType: string) {
   return <File size={20} className="text-slate-400" />;
 }
 
+type Visibility = 'everyone' | 'departments' | 'people';
+
+interface PersonOption { id: string; full_name: string; department: string | null; }
+
+// "Share with" picker used by the upload and edit forms
+function ShareFields({
+  visibility, sharedDepartments, sharedUserIds, departments, people, onChange,
+}: {
+  visibility: Visibility;
+  sharedDepartments: string[];
+  sharedUserIds: string[];
+  departments: string[];
+  people: PersonOption[];
+  onChange: (patch: { visibility?: Visibility; shared_departments?: string[]; shared_user_ids?: string[] }) => void;
+}) {
+  const toggle = (list: string[], value: string) =>
+    list.includes(value) ? list.filter(v => v !== value) : [...list, value];
+  const labelCls = 'block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5';
+  const inputCls = 'w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-300';
+  const chipCls = (on: boolean) =>
+    `text-xs px-2.5 py-1 rounded-lg border transition-colors ${on
+      ? 'bg-indigo-600 border-indigo-600 text-white'
+      : 'bg-white dark:bg-slate-700 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300'}`;
+  return (
+    <div>
+      <label className={labelCls}>Share with</label>
+      <select value={visibility} onChange={e => onChange({ visibility: e.target.value as Visibility })} className={inputCls}>
+        <option value="everyone">Everyone</option>
+        <option value="departments">Selected departments</option>
+        <option value="people">Selected people</option>
+      </select>
+      <p className="text-[11px] text-slate-400 mt-1">Directors and managers always see every document.</p>
+      {visibility === 'departments' && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {departments.length === 0 && <p className="text-xs text-slate-400">No departments found</p>}
+          {departments.map(d => (
+            <button type="button" key={d} onClick={() => onChange({ shared_departments: toggle(sharedDepartments, d) })}
+              className={chipCls(sharedDepartments.includes(d))}>{d}</button>
+          ))}
+        </div>
+      )}
+      {visibility === 'people' && (
+        <div className="flex flex-wrap gap-1.5 mt-2 max-h-40 overflow-y-auto">
+          {people.map(p => (
+            <button type="button" key={p.id} onClick={() => onChange({ shared_user_ids: toggle(sharedUserIds, p.id) })}
+              className={chipCls(sharedUserIds.includes(p.id))}>{p.full_name}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DocumentsPage() {
   const { effectiveUserId, pinSession } = useAuth();
   const supabase = createClient();
@@ -70,9 +126,24 @@ export default function DocumentsPage() {
     department: '',
     tags: '',
     file: null as File | null,
+    visibility: 'everyone' as Visibility,
+    shared_departments: [] as string[],
+    shared_user_ids: [] as string[],
+  });
+  const [people, setPeople] = useState<PersonOption[]>([]);
+  const [departments, setDepartments] = useState<string[]>([]);
+  const [editingDoc, setEditingDoc] = useState<CompanyDocument | null>(null);
+  const [editForm, setEditForm] = useState({
+    title: '',
+    description: '',
+    document_type: 'general',
+    visibility: 'everyone' as Visibility,
+    shared_departments: [] as string[],
+    shared_user_ids: [] as string[],
   });
 
-  const isDirectorOrManager = userRole === 'director' || userRole === 'manager' || userRole === 'executive';
+  // Only directors and managers can upload, change or delete company documents
+  const isDirectorOrManager = userRole === 'director' || userRole === 'manager';
 
   useEffect(() => {
     if (!effectiveUserId) return;
@@ -83,6 +154,11 @@ export default function DocumentsPage() {
     try {
       const { data: profile } = await supabase.from('user_profiles').select('role').eq('id', effectiveUserId!).single();
       setUserRole(profile?.role || 'employee');
+      const { data: peopleData } = await supabase
+        .from('user_profiles').select('id, full_name, department').eq('is_active', true).order('full_name');
+      const list = (peopleData || []) as PersonOption[];
+      setPeople(list);
+      setDepartments(Array.from(new Set(list.map(p => p.department).filter((d): d is string => !!d))).sort());
       await fetchDocuments();
     } catch {}
   };
@@ -95,16 +171,7 @@ export default function DocumentsPage() {
         .select('*, uploader:user_profiles!company_documents_uploaded_by_fkey(full_name)')
         .eq('is_public', true)
         .order('created_at', { ascending: false });
-      if (effectiveUserId) {
-        const { data: visibleFirmIds } = await supabase.rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' });
-        if (visibleFirmIds) {
-          const ids = (visibleFirmIds as string[]).filter(Boolean);
-          // Company-wide documents (no firm set) are visible to everyone
-          query = ids.length > 0
-            ? query.or(`firm_id.is.null,firm_id.in.(${ids.join(',')})`)
-            : query.is('firm_id', null);
-        }
-      }
+      // Company documents are shared with everyone, so no firm filter here
       const { data, error } = await query;
       if (error) throw error;
       setDocuments(data || []);
@@ -144,8 +211,41 @@ export default function DocumentsPage() {
     };
   }, [effectiveUserId]);
 
+  const openEdit = (doc: CompanyDocument) => {
+    setEditingDoc(doc);
+    setEditForm({
+      title: doc.title,
+      description: doc.description || '',
+      document_type: doc.document_type || 'general',
+      visibility: ((doc.visibility as Visibility) || 'everyone'),
+      shared_departments: doc.shared_departments || [],
+      shared_user_ids: doc.shared_user_ids || [],
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editingDoc) return;
+    if (!editForm.title.trim()) { toast.error('Title is required'); return; }
+    if (editForm.visibility === 'departments' && editForm.shared_departments.length === 0) { toast.error('Pick at least one department'); return; }
+    if (editForm.visibility === 'people' && editForm.shared_user_ids.length === 0) { toast.error('Pick at least one person'); return; }
+    const { error } = await supabase.from('company_documents').update({
+      title: editForm.title.trim(),
+      description: editForm.description,
+      document_type: editForm.document_type,
+      visibility: editForm.visibility,
+      shared_departments: editForm.visibility === 'departments' ? editForm.shared_departments : [],
+      shared_user_ids: editForm.visibility === 'people' ? editForm.shared_user_ids : [],
+    }).eq('id', editingDoc.id);
+    if (error) { toast.error('Could not save: ' + error.message); return; }
+    toast.success('Document updated');
+    setEditingDoc(null);
+    fetchDocuments();
+  };
+
   const handleUpload = async () => {
     if (!form.title.trim() || !form.file) { toast.error('Title and file are required'); return; }
+    if (form.visibility === 'departments' && form.shared_departments.length === 0) { toast.error('Pick at least one department'); return; }
+    if (form.visibility === 'people' && form.shared_user_ids.length === 0) { toast.error('Pick at least one person'); return; }
     if (!effectiveUserId) return;
     setUploading(true);
     try {
@@ -176,11 +276,14 @@ export default function DocumentsPage() {
         tags,
         uploaded_by: effectiveUserId,
         is_public: true,
+        visibility: form.visibility,
+        shared_departments: form.visibility === 'departments' ? form.shared_departments : [],
+        shared_user_ids: form.visibility === 'people' ? form.shared_user_ids : [],
       });
       if (error) throw error;
       toast.success('Document uploaded successfully');
       setShowUploadForm(false);
-      setForm({ title: '', description: '', document_type: 'general', department: '', tags: '', file: null });
+      setForm({ title: '', description: '', document_type: 'general', department: '', tags: '', file: null, visibility: 'everyone', shared_departments: [], shared_user_ids: [] });
       fetchDocuments();
     } catch (err: any) {
       toast.error(err.message || 'Upload failed');
@@ -328,6 +431,12 @@ export default function DocumentsPage() {
                       <Download size={14} className="text-slate-500 dark:text-slate-400" />
                     </a>
                     {isDirectorOrManager && (
+                      <button onClick={() => openEdit(doc)}
+                        className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors" title="Edit">
+                        <Pencil size={14} className="text-slate-400 hover:text-indigo-600" />
+                      </button>
+                    )}
+                    {isDirectorOrManager && (
                       <button onClick={() => handleDelete(doc)}
                         className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" title="Delete">
                         <Trash2 size={14} className="text-slate-400 hover:text-red-500" />
@@ -385,6 +494,14 @@ export default function DocumentsPage() {
                   onChange={e => setForm(p => ({ ...p, tags: e.target.value }))}
                   className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-300" />
               </div>
+              <ShareFields
+                visibility={form.visibility}
+                sharedDepartments={form.shared_departments}
+                sharedUserIds={form.shared_user_ids}
+                departments={departments}
+                people={people}
+                onChange={patch => setForm(p => ({ ...p, ...patch }))}
+              />
               <div>
                 <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">File *</label>
                 <div onClick={() => fileInputRef.current?.click()}
@@ -408,6 +525,55 @@ export default function DocumentsPage() {
                 className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-600 transition-colors flex items-center justify-center gap-2">
                 {uploading ? <Loader2 size={14} className="animate-spin" /> : null}
                 {uploading ? 'Uploading…' : 'Upload'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {editingDoc && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+              <h3 className="text-base font-700 text-slate-900 dark:text-slate-100">Edit Document</h3>
+              <button onClick={() => setEditingDoc(null)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
+                <X size={18} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Title *</label>
+                <input value={editForm.title} onChange={e => setEditForm(p => ({ ...p, title: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-300" />
+              </div>
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Description</label>
+                <textarea rows={2} value={editForm.description} onChange={e => setEditForm(p => ({ ...p, description: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-300 resize-none" />
+              </div>
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Type</label>
+                <select value={editForm.document_type} onChange={e => setEditForm(p => ({ ...p, document_type: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-300">
+                  {Object.entries(DOC_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+              <ShareFields
+                visibility={editForm.visibility}
+                sharedDepartments={editForm.shared_departments}
+                sharedUserIds={editForm.shared_user_ids}
+                departments={departments}
+                people={people}
+                onChange={patch => setEditForm(p => ({ ...p, ...patch }))}
+              />
+            </div>
+            <div className="flex gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700">
+              <button onClick={() => setEditingDoc(null)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 text-sm font-600 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+                Cancel
+              </button>
+              <button onClick={saveEdit}
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-600 transition-colors">
+                Save changes
               </button>
             </div>
           </div>
