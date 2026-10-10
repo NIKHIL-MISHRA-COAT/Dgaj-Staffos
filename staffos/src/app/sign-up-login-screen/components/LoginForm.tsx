@@ -13,8 +13,8 @@ type Step = 'email' | 'pin';
 
 const roleRoutes: Record<string, string> = {
   employee: '/employee-dashboard',
-  manager: '/analytics-reporting-dashboard',
-  executive: '/analytics-reporting-dashboard',
+  manager: '/employee-dashboard',
+  executive: '/employee-dashboard',
   director: '/director-control-panel',
 };
 
@@ -77,103 +77,59 @@ export default function LoginForm() {
     setIsLoading(true);
     setAuthError(null);
 
+    const fail = (message: string) => {
+      setAuthError(message);
+      setIsLoading(false);
+      setPinValues(['', '', '', '']);
+      pinRefs.current[0]?.focus();
+    };
+
     try {
-      const email = emailValue || pinSessionData?.email;
-
+      const email = (emailValue || pinSessionData?.email || '').trim().toLowerCase();
       if (!email) {
-        setAuthError('Please enter your email address.');
-        setIsLoading(false);
+        fail('Please enter your email address.');
         return;
       }
 
-      // Look up user by email in user_profiles
-      // Uses anon key — RLS policy "public_login_lookup_user_profiles" allows this
-      const { data: profile, error: profileError } = await supabase
-        .from('user_profiles')
-        .select('id, role, department, full_name, pin_hash, approval_status, is_active')
-        .eq('email', email.trim().toLowerCase())
-        .maybeSingle();
-
-      if (profileError) {
-        console.error('Profile lookup error:', profileError);
-        setAuthError('Unable to verify account. Please try again.');
-        setIsLoading(false);
-        setPinValues(['', '', '', '']);
-        pinRefs.current[0]?.focus();
+      // The PIN is checked on the server, which also returns a one-time login token
+      const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+      const res = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/pin-login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({ email, pin }),
+      });
+      const result = await res.json().catch(() => ({} as any));
+      if (!res.ok || !result.token_hash) {
+        fail(result.error || 'Unable to sign in. Please try again.');
         return;
       }
 
-      if (!profile) {
-        // Try case-insensitive fallback
-        const { data: profileFallback } = await supabase
-          .from('user_profiles')
-          .select('id, role, department, full_name, pin_hash, approval_status, is_active')
-          .ilike('email', email.trim())
-          .maybeSingle();
-
-        if (!profileFallback) {
-          setAuthError('No account found for this email. Contact your Director.');
-          setIsLoading(false);
-          setPinValues(['', '', '', '']);
-          pinRefs.current[0]?.focus();
-          return;
-        }
-
-        // Use fallback profile
-        return handleProfileLogin(profileFallback, pin, email);
+      // Exchange the token for a normal Supabase session
+      const { error: sessionError } = await supabase.auth.verifyOtp({
+        token_hash: result.token_hash,
+        type: 'magiclink',
+      });
+      if (sessionError) {
+        console.error('Session error:', sessionError);
+        fail('Could not start your session. Please try again.');
+        return;
       }
 
-      return handleProfileLogin(profile, pin, email);
+      // Keep the local PIN session so the rest of the app behaves as before
+      savePinSession(result.role, result.department || '', '', email, result.user_id);
+
+      toast.success(`Welcome back, ${result.full_name || email}!`, { duration: 2000 });
+
+      const route = roleRoutes[result.role] || '/employee-dashboard';
+      setTimeout(() => router.push(route), 800);
     } catch (err: any) {
       console.error('Login error:', err);
-      setAuthError('Something went wrong. Please try again.');
-      setIsLoading(false);
-      setPinValues(['', '', '', '']);
-      pinRefs.current[0]?.focus();
+      fail('Something went wrong. Please try again.');
     }
-  };
-
-  const handleProfileLogin = (profile: any, pin: string, email: string) => {
-    // Directors are always approved — skip approval check for director role
-    if (profile.role !== 'director' && profile.approval_status === 'pending') {
-      setAuthError('Your account is pending approval. Contact your Director.');
-      setIsLoading(false);
-      setPinValues(['', '', '', '']);
-      return;
-    }
-
-    if (profile.is_active === false) {
-      setAuthError('Your account has been deactivated. Contact your Director.');
-      setIsLoading(false);
-      setPinValues(['', '', '', '']);
-      return;
-    }
-
-    if (!profile.pin_hash) {
-      setAuthError('PIN not set. Contact your Director to assign your PIN.');
-      setIsLoading(false);
-      setPinValues(['', '', '', '']);
-      return;
-    }
-
-    // Compare PIN — stored as plain 4-digit string
-    const pinMatches = profile.pin_hash === pin;
-
-    if (!pinMatches) {
-      setAuthError('Invalid PIN. Please try again or contact your Director.');
-      setIsLoading(false);
-      setPinValues(['', '', '', '']);
-      pinRefs.current[0]?.focus();
-      return;
-    }
-
-    // Save session so user doesn't need to log in again
-    savePinSession(profile.role, profile.department || '', '', email, profile.id);
-
-    toast.success(`Welcome back, ${profile.full_name || email}!`, { duration: 2000 });
-
-    const route = roleRoutes[profile.role] || '/employee-dashboard';
-    setTimeout(() => router.push(route), 800);
   };
 
   const handleSwitchAccount = () => {

@@ -58,10 +58,7 @@ export async function POST(req: NextRequest) {
       }
 
       if (supabaseAdmin) {
-        const { error } = await supabaseAdmin
-          .from('user_profiles')
-          .update({ pin_hash: pin })
-          .eq('id', callerId);
+        const { error } = await supabaseAdmin.rpc('set_user_pin', { p_user_id: callerId, p_pin: pin });
         if (error) throw error;
       } else {
         // Fallback: use SECURITY DEFINER RPC function
@@ -86,10 +83,7 @@ export async function POST(req: NextRequest) {
         }
 
         if (supabaseAdmin) {
-          const { error } = await supabaseAdmin
-            .from('user_profiles')
-            .update({ pin_hash: pin })
-            .eq('id', userId);
+          const { error } = await supabaseAdmin.rpc('set_user_pin', { p_user_id: userId, p_pin: pin });
           if (error) throw error;
         } else {
           // Fallback: use SECURITY DEFINER RPC function

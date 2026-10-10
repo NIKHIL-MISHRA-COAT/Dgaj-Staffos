@@ -74,10 +74,7 @@ export async function POST(req: NextRequest) {
     // Set the PIN
     if (adminClient) {
       // Best path: service role bypasses RLS entirely
-      const { error: updateError } = await adminClient
-        .from('user_profiles')
-        .update({ pin_hash: String(pin), updated_at: new Date().toISOString() })
-        .eq('id', targetUserId);
+      const { error: updateError } = await adminClient.rpc('set_user_pin', { p_user_id: targetUserId, p_pin: String(pin) });
 
       if (updateError) {
         console.error('Admin PIN update error:', updateError);
