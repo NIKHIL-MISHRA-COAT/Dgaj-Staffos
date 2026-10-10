@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { Toaster } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
+import RequestedDocuments from './RequestedDocuments';
 
 
 
@@ -842,6 +843,9 @@ export default function EmployeeProfile() {
                 </div>
               </div>
             </div>
+
+            {/* Documents requested by the manager */}
+            <RequestedDocuments userId={effectiveUserId || ''} onUploaded={loadData} />
 
             {/* Documents List */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">

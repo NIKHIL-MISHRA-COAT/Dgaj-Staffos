@@ -9,6 +9,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useVisibleFirms } from '@/lib/useVisibleFirms';
 import FirmFilterTabs from '@/components/FirmFilterTabs';
 import FirmBadge from '@/components/FirmBadge';
+import EmployeeDocumentsPanel from './EmployeeDocumentsPanel';
 
 interface UserProfile {
   id: string;
@@ -1073,6 +1074,11 @@ export default function UserManagement() {
                   </div>
                 ))}
               </div>
+              <EmployeeDocumentsPanel
+                employeeId={viewingUser.id}
+                employeeName={viewingUser.full_name}
+                requesterId={getEffectiveUserId() || ''}
+              />
               <div className="flex gap-2 pt-2">
                 <button onClick={() => { setViewingUser(null); openEditUser(viewingUser); }}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-600 transition-colors">

@@ -34,6 +34,7 @@ export default function FirmFilterTabs({ firms, selectedFirmId, onSelect }: Firm
       {firms.map((f) => (
         <button
           key={f.id}
+          title={f.name}
           onClick={() => onSelect(f.id)}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-600 whitespace-nowrap border transition-colors ${
             selectedFirmId === f.id
@@ -41,7 +42,7 @@ export default function FirmFilterTabs({ firms, selectedFirmId, onSelect }: Firm
               : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
           }`}
         >
-          <Building2 size={12} /> {f.name}
+          <Building2 size={12} /> {f.code || f.name}
         </button>
       ))}
     </div>
