@@ -21,6 +21,8 @@ interface EmployeeLocation {
     job_title: string;
     department: string;
     avatar_url: string;
+    travel_approved?: boolean;
+    firms?: { name: string; code: string } | null;
   };
 }
 
@@ -61,6 +63,10 @@ interface LocationAlert {
   };
 }
 
+function firmName(p: any): string {
+  return p?.firms?.name || '';
+}
+
 function getInitials(name: string) {
   return name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 }
@@ -86,6 +92,23 @@ export default function LiveLocationMap() {
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [selectedEmployee, setSelectedEmployee] = useState<EmployeeLocation | null>(null);
+  const [search, setSearch] = useState('');
+  const matchesSearch = (p: any) => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return [p?.full_name, p?.job_title, p?.department, firmName(p)]
+      .some((v) => typeof v === 'string' && v.toLowerCase().includes(q));
+  };
+  const visibleLocations = locations.filter((l) => matchesSearch(l.user_profiles));
+  const searchBox = (
+    <input
+      type="search"
+      value={search}
+      onChange={(e) => setSearch(e.target.value)}
+      placeholder="Search by employee or firm name…"
+      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+    />
+  );
   const [mapUrl, setMapUrl] = useState<string>('');
   const [locationAlerts, setLocationAlerts] = useState<LocationAlert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
@@ -101,6 +124,7 @@ export default function LiveLocationMap() {
 
   // Location settings
   const [locationSettings, setLocationSettings] = useState<LocationSetting[]>([]);
+  const visibleSettings = locationSettings.filter((st: any) => matchesSearch(st.user_profiles));
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [editingSetting, setEditingSetting] = useState<LocationSetting | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -145,7 +169,9 @@ export default function LiveLocationMap() {
             full_name,
             job_title,
             department,
-            avatar_url
+            avatar_url,
+            travel_approved,
+            firms!firm_id(name, code)
           )
         `)
         .eq('is_active', true)
@@ -183,7 +209,7 @@ export default function LiveLocationMap() {
         .from('location_settings')
         .select(`
           id, user_id, office_name, center_latitude, center_longitude, radius_meters,
-          user_profiles (full_name, job_title)
+          user_profiles (full_name, job_title, travel_approved, firms!firm_id(name, code))
         `)
         .order('created_at', { ascending: false });
       setLocationSettings((data as any) || []);
@@ -201,7 +227,7 @@ export default function LiveLocationMap() {
         .from('location_alerts')
         .select(`
           id, user_id, alert_type, message, resolved_at, created_at,
-          user_profiles (full_name, job_title, department, travel_approved)
+          user_profiles (full_name, job_title, department, travel_approved, firms!firm_id(name, code))
         `)
         .is('resolved_at', null)
         .order('created_at', { ascending: false })
@@ -351,6 +377,26 @@ export default function LiveLocationMap() {
     }
   };
 
+  const toggleTravel = async (userId: string, current: boolean) => {
+    const callerId = user?.id || pinSession?.userId || null;
+    if (!callerId) { setError('Not authenticated'); return; }
+    setSavingSettings(true);
+    try {
+      const res = await fetch('/api/director-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle_travel', userId, callerId, updates: { travel_approved: !current } }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || 'Could not update travel status');
+      await Promise.all([fetchLocationSettings(), fetchLocationAlerts()]);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to update travel status');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   const handleUpdateSetting = async () => {
     if (!editingSetting) return;
     setSavingSettings(true);
@@ -464,7 +510,7 @@ export default function LiveLocationMap() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-semibold text-slate-900">{(alert.user_profiles as any)?.full_name || 'Employee'}</p>
-                        <p className="text-xs text-slate-500">{(alert.user_profiles as any)?.job_title || ''} · {timeAgo(alert.created_at)}</p>
+                        <p className="text-xs text-slate-500">{[firmName(alert.user_profiles), (alert.user_profiles as any)?.job_title].filter(Boolean).join(' · ')} · {timeAgo(alert.created_at)}</p>
                         <p className="text-xs text-red-600 mt-0.5">⚠️ Location services turned off while clocked in</p>
                       </div>
                       <button
@@ -488,14 +534,15 @@ export default function LiveLocationMap() {
                   <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
                     <Users size={16} className="text-slate-500" />
                     <span className="text-sm font-semibold text-slate-700">Active Employees</span>
-                    <span className="ml-auto bg-blue-100 text-blue-700 text-xs font-bold px-2 py-0.5 rounded-full">{locations.length}</span>
+                    <span className="ml-auto bg-blue-100 text-blue-700 text-xs font-bold px-2 py-0.5 rounded-full">{visibleLocations.length}</span>
                   </div>
+                  <div className="px-4 py-3 border-b border-slate-100">{searchBox}</div>
                   {loading && locations.length === 0 ? (
                     <div className="p-6 text-center">
                       <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
                       <p className="text-sm text-slate-500">Loading locations…</p>
                     </div>
-                  ) : locations.length === 0 ? (
+                  ) : visibleLocations.length === 0 ? (
                     <div className="p-6 text-center">
                       <MapPin size={32} className="text-slate-300 mx-auto mb-2" />
                       <p className="text-sm font-medium text-slate-600">No active employees</p>
@@ -503,7 +550,10 @@ export default function LiveLocationMap() {
                     </div>
                   ) : (
                     <div className="divide-y divide-slate-100 max-h-[480px] overflow-y-auto">
-                      {locations.map((loc) => {
+                      {visibleLocations.length === 0 && (
+                        <p className="p-4 text-sm text-slate-500 text-center">No employees match “{search}”</p>
+                      )}
+                      {visibleLocations.map((loc) => {
                         const name = loc.user_profiles?.full_name || 'Unknown';
                         const isSelected = selectedEmployee?.id === loc.id;
                         return (
@@ -517,7 +567,7 @@ export default function LiveLocationMap() {
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-semibold text-slate-900 truncate">{name}</p>
-                              <p className="text-xs text-slate-500 truncate">{loc.user_profiles?.job_title || loc.user_profiles?.department || 'Employee'}</p>
+                              <p className="text-xs text-slate-500 truncate">{[firmName(loc.user_profiles) || 'No firm assigned', loc.user_profiles?.job_title || loc.user_profiles?.department || 'Employee'].filter(Boolean).join(' · ')}</p>
                               <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                                 <span className="text-xs text-emerald-600 font-medium">Clocked in · {timeAgo(loc.recorded_at)}</span>
@@ -552,7 +602,7 @@ export default function LiveLocationMap() {
                     <MapPin size={16} className="text-slate-500" />
                     <span className="text-sm font-semibold text-slate-700">
                       {selectedEmployee
-                        ? `${selectedEmployee.user_profiles?.full_name || 'Employee'}'s Location`
+                        ? `${selectedEmployee.user_profiles?.full_name || 'Employee'}'s Location${firmName(selectedEmployee.user_profiles) ? ` · ${firmName(selectedEmployee.user_profiles)}` : ''}`
                         : locations.length > 0
                         ? 'Most Recent Active Location' :'Map View'}
                     </span>
@@ -603,7 +653,7 @@ export default function LiveLocationMap() {
                 {/* Location cards grid for multiple employees */}
                 {locations.length > 1 && (
                   <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    {locations.slice(0, 6).map((loc) => {
+                    {visibleLocations.slice(0, 6).map((loc) => {
                       const name = loc.user_profiles?.full_name || 'Unknown';
                       return (
                         <button
@@ -615,7 +665,7 @@ export default function LiveLocationMap() {
                             <div className="w-7 h-7 rounded-full bg-blue-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
                               {getInitials(name)}
                             </div>
-                            <span className="text-xs font-semibold text-slate-800 truncate">{name.split(' ')[0]}</span>
+                            <span className="min-w-0"><span className="block text-xs font-semibold text-slate-800 truncate">{name.split(' ')[0]}</span>{firmName(loc.user_profiles) && <span className="block text-[10px] text-slate-500 truncate">{firmName(loc.user_profiles)}</span>}</span>
                           </div>
                           <div className="flex items-center gap-1">
                             <Clock size={10} className="text-slate-400" />
@@ -873,7 +923,11 @@ export default function LiveLocationMap() {
               </div>
             ) : (
               <div className="space-y-3">
-                {locationSettings.map((setting: any) => (
+                <div className="bg-white rounded-2xl border border-slate-200 p-3">{searchBox}</div>
+                {visibleSettings.length === 0 && (
+                  <p className="text-sm text-slate-500 text-center py-4">No boundary settings match “{search}”</p>
+                )}
+                {visibleSettings.map((setting: any) => (
                   <div key={setting.id} className="bg-white rounded-2xl border border-slate-200 p-5">
                     {editingSetting?.id === setting.id ? (
                       <div className="space-y-4">
@@ -937,15 +991,21 @@ export default function LiveLocationMap() {
                           </div>
                           <div>
                             <p className="text-sm font-semibold text-slate-900">{setting.user_profiles?.full_name || 'Unknown Employee'}</p>
-                            <p className="text-xs text-slate-500">{setting.user_profiles?.job_title || ''}</p>
+                            <p className="text-xs text-slate-500">{[firmName(setting.user_profiles), setting.user_profiles?.job_title].filter(Boolean).join(' · ')}</p>
                             <div className="flex flex-wrap gap-3 mt-2">
                               <span className="inline-flex items-center gap-1 text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">
                                 <MapPin size={10} />
                                 {setting.office_name}
                               </span>
-                              <span className="inline-flex items-center gap-1 text-xs bg-emerald-50 text-emerald-700 px-2 py-1 rounded-lg">
-                                ⊙ {setting.radius_meters}m radius
-                              </span>
+                              {setting.user_profiles?.travel_approved ? (
+                                <span className="inline-flex items-center gap-1 text-xs bg-amber-50 text-amber-700 px-2 py-1 rounded-lg">
+                                  ✈ Free from boundary (travelling)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-xs bg-emerald-50 text-emerald-700 px-2 py-1 rounded-lg">
+                                  ⊙ {setting.radius_meters}m radius
+                                </span>
+                              )}
                               <span className="inline-flex items-center gap-1 text-xs bg-slate-50 text-slate-500 px-2 py-1 rounded-lg font-mono">
                                 {setting.center_latitude.toFixed(5)}, {setting.center_longitude.toFixed(5)}
                               </span>
@@ -953,6 +1013,14 @@ export default function LiveLocationMap() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2 flex-shrink-0">
+                          <button
+                            onClick={() => toggleTravel(setting.user_id, !!setting.user_profiles?.travel_approved)}
+                            disabled={savingSettings}
+                            title={setting.user_profiles?.travel_approved ? 'Enforce radius again' : 'Free this employee from the radius (travelling)'}
+                            className={`px-2.5 py-2 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-50 ${setting.user_profiles?.travel_approved ? 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                          >
+                            {setting.user_profiles?.travel_approved ? 'Enforce radius' : 'Travelling'}
+                          </button>
                           <button
                             onClick={() => setEditingSetting(setting)}
                             className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
