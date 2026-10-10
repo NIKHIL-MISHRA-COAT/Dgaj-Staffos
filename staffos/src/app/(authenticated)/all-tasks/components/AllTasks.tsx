@@ -1232,9 +1232,14 @@ function CreateTaskModal({
   const inputCls = 'w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
   const labelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1';
 
+  // Every new task starts today (local date, so India time never shows yesterday)
+  const startToday = toLocalDate(new Date());
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!f.title.trim()) { toast.error('Task title is required'); return; }
+    if (!f.due_date) { toast.error('Due date is required'); return; }
+    if (f.due_date < startToday) { toast.error('Due date cannot be before today'); return; }
     setSaving(true);
     try {
       const picked = users.filter(u => f.assignees.includes(u.id));
@@ -1246,7 +1251,8 @@ function CreateTaskModal({
         priority: f.priority,
         status: 'todo',
         task_status: 'not_started',
-        due_date: f.due_date || null,
+        start_date: startToday,
+        due_date: f.due_date,
         due_time: f.due_time || null,
         // First picked person is the primary assignee; every picked person is in assigned_user_ids
         assigned_to: f.assignees[0] || null,
@@ -1314,10 +1320,15 @@ function CreateTaskModal({
               </select>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
-              <label className={labelCls}>Due date</label>
-              <input type="date" className={inputCls} value={f.due_date} onChange={e => set('due_date', e.target.value)} />
+              <label className={labelCls}>Start date</label>
+              <input type="date" className={`${inputCls} opacity-70 cursor-not-allowed`} value={startToday} readOnly disabled />
+            </div>
+            <div>
+              <label className={labelCls}>Due date *</label>
+              <input type="date" className={inputCls} value={f.due_date} min={startToday} required
+                onChange={e => set('due_date', e.target.value)} />
             </div>
             <div>
               <label className={labelCls}>Due time</label>
