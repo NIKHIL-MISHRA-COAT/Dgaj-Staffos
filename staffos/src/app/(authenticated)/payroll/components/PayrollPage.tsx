@@ -217,11 +217,13 @@ export default function PayrollPage() {
   // Per-day salary = total salary / working days (holidays & weekly-off already excluded
   // by attendance_summary_for_period when working_days was fetched). Live-recalculated
   // any time an input changes — this is a pure function of the current form state.
-  const computeSimplePayroll = (totalSalary: number, workingDays: number, daysPresent: number, daysAbsent: number, deductionPerAbsentDay: number) => {
+  // Prorated pay: per-day salary x days present. Deduction is whatever is not paid,
+  // so Total Deducted and Total To Be Paid always agree with Amount Payable.
+  const computeSimplePayroll = (totalSalary: number, workingDays: number, daysPresent: number) => {
     const perDaySalary = workingDays > 0 ? totalSalary / workingDays : 0;
     const amountPayable = perDaySalary * daysPresent;
-    const totalDeducted = daysAbsent * perDaySalary;
-    const totalToPay = Math.max(0, totalSalary - totalDeducted);
+    const totalToPay = Math.max(0, amountPayable);
+    const totalDeducted = Math.max(0, totalSalary - totalToPay);
     return { perDaySalary, amountPayable, totalDeducted, totalToPay };
   };
 
@@ -231,9 +233,7 @@ export default function PayrollPage() {
   const livePreview = computeSimplePayroll(
     parseFloat(processForm.total_salary) || 0,
     parseFloat(processForm.working_days) || 0,
-    parseFloat(processForm.days_present) || 0,
-    parseFloat(processForm.days_absent) || 0,
-    parseFloat(processForm.deduction_per_absent_day) || 0
+    parseFloat(processForm.days_present) || 0
   );
 
   // Auto-fill working days / days present / days absent from actual attendance
@@ -310,14 +310,13 @@ export default function PayrollPage() {
     const workingDays = parseFloat(processForm.working_days) || 0;
     const daysPresent = parseFloat(processForm.days_present) || 0;
     const daysAbsent = parseFloat(processForm.days_absent) || 0;
-    const deductionPerDay = parseFloat(processForm.deduction_per_absent_day) || 0;
 
     if (totalSalary <= 0) { toast.error('Total salary must be greater than 0'); return; }
     if (workingDays <= 0) { toast.error('Working days must be greater than 0'); return; }
 
     setProcessing(true);
     try {
-      const calc = computeSimplePayroll(totalSalary, workingDays, daysPresent, daysAbsent, deductionPerDay);
+      const calc = computeSimplePayroll(totalSalary, workingDays, daysPresent);
 
       const payload = {
         user_id: processForm.user_id,
@@ -330,7 +329,7 @@ export default function PayrollPage() {
         days_worked: daysPresent,
         amount_payable: calc.amountPayable,
         days_absent: daysAbsent,
-        deduction_per_absent_day: deductionPerDay,
+        deduction_per_absent_day: 0,
         total_deducted: calc.totalDeducted,
         total_deductions: calc.totalDeducted,
         net_salary: calc.totalToPay,
@@ -846,18 +845,12 @@ const handleSaveSalaryStructure = async () => {
                 </div>
               </div>
 
-              {/* Row 3: absent days, deduction/day, total deducted (derived) */}
-              <div className="grid grid-cols-3 gap-3">
+              {/* Row 3: absent days, total deducted (derived) */}
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Absent Days *</label>
                   <input type="number" min="0" value={processForm.days_absent}
                     onChange={e => setProcessForm(p => ({ ...p, days_absent: e.target.value }))}
-                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
-                </div>
-                <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Deduction/Absent Day (₹)</label>
-                  <input type="number" min="0" value={processForm.deduction_per_absent_day}
-                    onChange={e => setProcessForm(p => ({ ...p, deduction_per_absent_day: e.target.value }))}
                     className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
                 </div>
                 <div>
