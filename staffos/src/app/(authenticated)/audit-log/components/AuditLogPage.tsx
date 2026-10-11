@@ -73,6 +73,54 @@ function fmtDT(d: string | null | undefined) {
   try { return new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch { return d; }
 }
 
+// Plain-language helpers: turn stored change data into readable text, not JSON
+const HIDDEN_FIELDS = new Set(['id', 'created_at', 'updated_at', 'pin_hash', 'pin_failed_attempts', 'pin_locked_until', 'password']);
+
+function prettyKey(k: string): string {
+  return k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function fmtValue(v: any): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string') {
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) ? fmtDT(v) : v;
+  }
+  if (Array.isArray(v)) return v.length ? v.map(fmtValue).join(', ') : '—';
+  if (typeof v === 'object') {
+    const parts = Object.entries(v)
+      .filter(([k]) => !HIDDEN_FIELDS.has(k))
+      .map(([k, x]) => `${prettyKey(k)}: ${fmtValue(x)}`);
+    return parts.length ? parts.join('; ') : '—';
+  }
+  return String(v);
+}
+
+type ChangeRow = { field: string; before: string; after: string };
+
+function buildChanges(oldV: any, newV: any): ChangeRow[] {
+  const o = oldV && typeof oldV === 'object' ? oldV : {};
+  const n = newV && typeof newV === 'object' ? newV : {};
+  const keys = Array.from(new Set([...Object.keys(o), ...Object.keys(n)])).filter((k) => !HIDDEN_FIELDS.has(k));
+  const rows: ChangeRow[] = [];
+  for (const k of keys) {
+    const before = fmtValue(o[k]);
+    const after = fmtValue(n[k]);
+    if (oldV && newV && before === after) continue; // unchanged field
+    rows.push({ field: prettyKey(k), before, after });
+  }
+  return rows;
+}
+
+function changesToText(oldV: any, newV: any): string {
+  const rows = buildChanges(oldV, newV);
+  if (rows.length === 0) return '—';
+  return rows
+    .map((r) => (oldV && newV ? `${r.field}: ${r.before} → ${r.after}` : `${r.field}: ${oldV ? r.before : r.after}`))
+    .join('; ');
+}
+
 export default function AuditLogPage() {
   const { effectiveUserId } = useAuth();
   const supabase = createClient();
@@ -161,7 +209,7 @@ export default function AuditLogPage() {
 
   const handleExportCSV = () => {
     if (logs.length === 0) { toast.error('No logs to export'); return; }
-    const headers = ['Timestamp', 'User', 'Action', 'Module', 'Table', 'Record ID', 'IP Address', 'Old Value', 'New Value'];
+    const headers = ['Timestamp', 'User', 'Action', 'Module', 'Table', 'Record ID', 'IP Address', 'Changes'];
     const rows = logs.map(l => [
       fmtDT(l.created_at),
       actorLabel(l),
@@ -170,8 +218,7 @@ export default function AuditLogPage() {
       l.table_name,
       l.record_id || '—',
       l.ip_address || '—',
-      l.old_values ? JSON.stringify(l.old_values) : '—',
-      l.new_values ? JSON.stringify(l.new_values) : '—',
+      changesToText(l.old_values, l.new_values),
     ]);
     downloadCSV(`audit-log-${dateFrom}-to-${dateTo}.csv`, headers, rows);
     toast.success('Audit log exported');
@@ -372,22 +419,43 @@ export default function AuditLogPage() {
                   <p className="font-semibold text-slate-700 dark:text-slate-300">{viewingEntry.module || viewingEntry.table_name}</p>
                 </div>
               </div>
-              {viewingEntry.old_values && (
-                <div>
-                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Old Values</p>
-                  <pre className="text-xs bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-3 overflow-x-auto text-red-800 dark:text-red-300 whitespace-pre-wrap">
-                    {JSON.stringify(viewingEntry.old_values, null, 2)}
-                  </pre>
-                </div>
-              )}
-              {viewingEntry.new_values && (
-                <div>
-                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">New Values</p>
-                  <pre className="text-xs bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl p-3 overflow-x-auto text-emerald-800 dark:text-emerald-300 whitespace-pre-wrap">
-                    {JSON.stringify(viewingEntry.new_values, null, 2)}
-                  </pre>
-                </div>
-              )}
+              {(() => {
+                const v = viewingEntry;
+                const mode = v.old_values && v.new_values ? 'change' : v.new_values ? 'created' : 'removed';
+                const rows = buildChanges(v.old_values, v.new_values);
+                const heading = mode === 'change' ? 'What changed' : mode === 'created' ? 'Values set' : 'Values removed';
+                return (
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">{heading}</p>
+                    {rows.length === 0 ? (
+                      <p className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/40 rounded-xl p-3">No field-level details were recorded for this entry.</p>
+                    ) : (
+                      <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-50 dark:bg-slate-700/40 text-slate-500 dark:text-slate-400">
+                            <tr>
+                              <th className="text-left font-semibold px-3 py-2">Field</th>
+                              {mode === 'change' && <th className="text-left font-semibold px-3 py-2">Before</th>}
+                              <th className="text-left font-semibold px-3 py-2">{mode === 'change' ? 'After' : 'Value'}</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                            {rows.map((r) => (
+                              <tr key={r.field}>
+                                <td className="px-3 py-2 font-semibold text-slate-700 dark:text-slate-300 align-top">{r.field}</td>
+                                {mode === 'change' && <td className="px-3 py-2 text-red-700 dark:text-red-400 break-words">{r.before}</td>}
+                                <td className={`px-3 py-2 break-words ${mode === 'removed' ? 'text-red-700 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                                  {mode === 'removed' ? r.before : r.after}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>
