@@ -23,6 +23,8 @@ interface FormState {
   is_half_day: boolean;
   half_day_period: string;
   certificate_file: File | null;
+  substitute_kind: '' | 'worked' | 'compensate';
+  substitute_work_date: string;
 }
 
 const leaveTypeConfig: Record<LeaveType, {
@@ -70,6 +72,8 @@ const defaultForm: FormState = {
   is_half_day: false,
   half_day_period: 'morning',
   certificate_file: null,
+  substitute_kind: '',
+  substitute_work_date: '',
 };
 
 export default function LeaveRequestForm() {
@@ -203,6 +207,21 @@ export default function LeaveRequestForm() {
       toast.error('Please provide a reason for your leave');
       return;
     }
+    if (form.leave_type === 'substitute') {
+      if (!form.substitute_kind || !form.substitute_work_date) {
+        toast.error('Select the weekend/holiday this substitute leave is for');
+        return;
+      }
+      const today = new Date().toISOString().split('T')[0];
+      if (form.substitute_kind === 'worked' && form.substitute_work_date > today) {
+        toast.error('A day you already worked cannot be in the future');
+        return;
+      }
+      if (form.substitute_kind === 'compensate' && form.substitute_work_date <= today) {
+        toast.error('Choose a future date for the day you will compensate');
+        return;
+      }
+    }
     if (selectedConfig.requiresCertificate && !form.certificate_file) {
       toast.error(`A doctor certificate is required for ${selectedConfig.label}`);
       return;
@@ -235,6 +254,8 @@ export default function LeaveRequestForm() {
         doctor_certificate_url: certUrl,
         doctor_certificate_path: certPath,
         status: 'pending',
+        substitute_kind: form.leave_type === 'substitute' ? form.substitute_kind : null,
+        substitute_work_date: form.leave_type === 'substitute' ? form.substitute_work_date : null,
       });
 
       if (error) throw error;
@@ -400,6 +421,31 @@ export default function LeaveRequestForm() {
                       Exceeds available balance ({selectedBalance.remaining} days remaining)
                     </p>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* Substitute: which weekend/holiday this leave is for */}
+            {form.leave_type === 'substitute' && (
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl space-y-3">
+                <p className="text-sm font-600 text-blue-800">Substitute leave is for a weekend or holiday</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'worked', label: 'I worked on that day' },
+                    { id: 'compensate', label: 'I will compensate on that day' },
+                  ] as const).map((o) => (
+                    <button key={o.id} type="button"
+                      onClick={() => setForm((prev) => ({ ...prev, substitute_kind: o.id }))}
+                      className={`py-2 px-3 rounded-lg border text-xs font-600 transition-colors ${form.substitute_kind === o.id ? 'border-blue-500 bg-white text-blue-700' : 'border-blue-200 bg-blue-50/50 text-blue-700/80'}`}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 mb-1.5">Weekend / holiday date</label>
+                  <input type="date" value={form.substitute_work_date}
+                    onChange={(e) => setForm((prev) => ({ ...prev, substitute_work_date: e.target.value }))}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-300" />
                 </div>
               </div>
             )}

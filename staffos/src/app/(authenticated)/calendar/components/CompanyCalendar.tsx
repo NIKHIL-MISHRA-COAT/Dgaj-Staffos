@@ -117,7 +117,7 @@ export default function CompanyCalendar() {
 
   useEffect(() => {
     fetchEvents();
-  }, [currentMonth, currentYear, effectiveUserId]);
+  }, [currentMonth, currentYear, effectiveUserId, profileRole]);
 
   // Real-time sync: refresh the calendar whenever calendar events, tasks, leave
   // requests, or holidays change — for this user or anyone else on the team.
@@ -246,31 +246,52 @@ export default function CompanyCalendar() {
       let leaveEvents: CalendarEvent[] = [];
       const leaveDates = new Set<string>(); // approved leave days — these must never show as absent
       if (uid) {
-        const { data: leaves } = await supabase
+        // Directors also see substitute leave (weekend/holiday worked or to be
+        // compensated) for every employee; everyone else sees their own leave.
+        const leaveQuery = supabase
           .from('leave_requests')
-          .select('id, leave_type, start_date, end_date, status')
-          .eq('user_id', uid)
+          .select('id, user_id, leave_type, start_date, end_date, status, substitute_kind, substitute_work_date, user_profiles!leave_requests_user_id_fkey(full_name)')
           .in('status', ['approved', 'pending'])
           .lte('start_date', monthEnd)
           .gte('end_date', monthStart);
+        const { data: leaves } = isDirector
+          ? await leaveQuery.or(`user_id.eq.${uid},substitute_kind.not.is.null`)
+          : await leaveQuery.eq('user_id', uid);
+
+        const substituteLabel = (leave: any): string => {
+          if (!leave.substitute_kind) return '';
+          let when = '';
+          if (leave.substitute_work_date) {
+            const [y, m, d] = String(leave.substitute_work_date).slice(0, 10).split('-').map(Number);
+            when = new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+          }
+          return leave.substitute_kind === 'worked'
+            ? ` – worked ${when}`
+            : ` – compensate on ${when}`;
+        };
 
         (leaves || []).forEach((leave: any) => {
           const [sy, sm, sd] = String(leave.start_date).slice(0, 10).split('-').map(Number);
           const [ey, em, ed] = String(leave.end_date).slice(0, 10).split('-').map(Number);
           const cur = new Date(sy, sm - 1, sd);
           const last = new Date(ey, em - 1, ed);
+          const isOwn = leave.user_id === uid;
+          const owner = leave.user_profiles?.full_name || 'Employee';
+          const kindText = leave.substitute_kind ? 'Substitute' : `${String(leave.leave_type || '').replace('_', ' ')} Leave`;
           while (cur <= last) {
             const dateStr = toDateStr(cur);
             if (dateStr >= monthStart && dateStr <= monthEnd) {
-              if (leave.status === 'approved') leaveDates.add(dateStr);
+              // Only the viewer's own approved days count as leave for attendance.
+              if (isOwn && leave.status === 'approved') leaveDates.add(dateStr);
+              const who = isDirector && !isOwn ? `${owner} · ` : '';
               leaveEvents.push({
                 id: `leave-${leave.id}-${dateStr}`,
-                title: `🏖️ ${String(leave.leave_type || '').replace('_', ' ')} Leave`,
+                title: `🏖️ ${who}${kindText}${substituteLabel(leave)}`,
                 event_date: dateStr,
                 event_type: 'leave' as EventType,
                 recurring: 'none' as RecurringType,
                 description: leave.status === 'approved' ? 'Approved Leave' : 'Pending Leave',
-                created_by: uid,
+                created_by: leave.user_id,
               });
             }
             cur.setDate(cur.getDate() + 1);
