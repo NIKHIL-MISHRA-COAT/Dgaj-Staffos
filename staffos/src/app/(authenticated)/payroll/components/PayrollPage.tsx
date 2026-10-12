@@ -126,6 +126,11 @@ export default function PayrollPage() {
     days_present: '',
     days_absent: '',
     deduction_per_absent_day: '1000',
+    avg_hours_per_day: '',
+    overtime_hours: '',
+    overtime_pay: '',
+    bonus: '',
+    other_deduction: '',
     notes: '',
     payment_method: 'bank_transfer',
   });
@@ -219,11 +224,22 @@ export default function PayrollPage() {
   // any time an input changes — this is a pure function of the current form state.
   // Prorated pay: per-day salary x days present. Deduction is whatever is not paid,
   // so Total Deducted and Total To Be Paid always agree with Amount Payable.
-  const computeSimplePayroll = (totalSalary: number, workingDays: number, daysPresent: number) => {
+  // Overtime pay and bonus are added on top; other deduction (manual) is taken off.
+  // Total Deducted = unpaid salary + other deduction, so the figures always agree:
+  // Total To Be Paid = Total Salary − Total Deducted + Overtime Pay + Bonus.
+  const computeSimplePayroll = (
+    totalSalary: number,
+    workingDays: number,
+    daysPresent: number,
+    overtimePay = 0,
+    bonus = 0,
+    otherDeduction = 0,
+  ) => {
     const perDaySalary = workingDays > 0 ? totalSalary / workingDays : 0;
     const amountPayable = perDaySalary * daysPresent;
-    const totalToPay = Math.max(0, amountPayable);
-    const totalDeducted = Math.max(0, totalSalary - totalToPay);
+    const unpaidSalary = Math.max(0, totalSalary - Math.max(0, amountPayable));
+    const totalDeducted = unpaidSalary + Math.max(0, otherDeduction);
+    const totalToPay = Math.max(0, amountPayable + Math.max(0, overtimePay) + Math.max(0, bonus) - Math.max(0, otherDeduction));
     return { perDaySalary, amountPayable, totalDeducted, totalToPay };
   };
 
@@ -233,8 +249,12 @@ export default function PayrollPage() {
   const livePreview = computeSimplePayroll(
     parseFloat(processForm.total_salary) || 0,
     parseFloat(processForm.working_days) || 0,
-    parseFloat(processForm.days_present) || 0
+    parseFloat(processForm.days_present) || 0,
+    parseFloat(processForm.overtime_pay) || 0,
+    parseFloat(processForm.bonus) || 0,
+    parseFloat(processForm.other_deduction) || 0,
   );
+  const hourlyRate = livePreview.perDaySalary > 0 ? livePreview.perDaySalary / 8 : 0;
 
   // Auto-fill working days / days present / days absent from actual attendance
   // for the selected employee + period, plus their total salary from their
@@ -249,12 +269,27 @@ export default function PayrollPage() {
         p_user_id: userId, p_start: start, p_end: end,
       });
       const summary = Array.isArray(data) ? data[0] : data;
+
+      // Average hours per day worked and overtime hours, from the same period's attendance.
+      const { data: att } = await supabase
+        .from('attendance_records')
+        .select('total_hours, overtime_hours, status, clock_in')
+        .eq('user_id', userId)
+        .gte('work_date', start)
+        .lte('work_date', end);
+      const workedRows = (att || []).filter((r: any) => r.clock_in && Number(r.total_hours) > 0);
+      const totalWorked = workedRows.reduce((s: number, r: any) => s + Number(r.total_hours || 0), 0);
+      const overtimeTotal = (att || []).reduce((s: number, r: any) => s + Number(r.overtime_hours || 0), 0);
+      const avgHours = workedRows.length > 0 ? totalWorked / workedRows.length : 0;
+
       setProcessForm(p => ({
         ...p,
         total_salary: structure ? String(getTotalMonthlySalary(structure)) : p.total_salary,
         working_days: summary ? String(summary.working_days) : p.working_days,
         days_present: summary ? String(summary.days_present) : p.days_present,
         days_absent: summary ? String(summary.days_absent) : p.days_absent,
+        avg_hours_per_day: workedRows.length > 0 ? avgHours.toFixed(2) : '',
+        overtime_hours: overtimeTotal > 0 ? overtimeTotal.toFixed(2) : '',
       }));
     } catch {
       // Non-fatal — manager can still fill these in by hand.
@@ -282,6 +317,11 @@ export default function PayrollPage() {
       days_present: String(record.days_worked ?? ''),
       days_absent: String(record.days_absent ?? ''),
       deduction_per_absent_day: String(record.deduction_per_absent_day ?? 1000),
+      avg_hours_per_day: '',
+      overtime_hours: String(record.overtime_hours ?? ''),
+      overtime_pay: String(record.overtime_pay ?? ''),
+      bonus: String(record.bonus ?? ''),
+      other_deduction: String(record.other_deductions ?? ''),
       notes: record.notes || '',
       payment_method: record.payment_method || 'bank_transfer',
     });
@@ -297,6 +337,7 @@ export default function PayrollPage() {
     setProcessForm({
       user_id: '', pay_period_start: '', pay_period_end: '', total_salary: '',
       working_days: '', days_present: '', days_absent: '', deduction_per_absent_day: '1000',
+      avg_hours_per_day: '', overtime_hours: '', overtime_pay: '', bonus: '', other_deduction: '',
       notes: '', payment_method: 'bank_transfer',
     });
     setShowProcessModal(true);
@@ -310,13 +351,17 @@ export default function PayrollPage() {
     const workingDays = parseFloat(processForm.working_days) || 0;
     const daysPresent = parseFloat(processForm.days_present) || 0;
     const daysAbsent = parseFloat(processForm.days_absent) || 0;
+    const overtimeHours = parseFloat(processForm.overtime_hours) || 0;
+    const overtimePay = parseFloat(processForm.overtime_pay) || 0;
+    const bonus = parseFloat(processForm.bonus) || 0;
+    const otherDeduction = parseFloat(processForm.other_deduction) || 0;
 
     if (totalSalary <= 0) { toast.error('Total salary must be greater than 0'); return; }
     if (workingDays <= 0) { toast.error('Working days must be greater than 0'); return; }
 
     setProcessing(true);
     try {
-      const calc = computeSimplePayroll(totalSalary, workingDays, daysPresent);
+      const calc = computeSimplePayroll(totalSalary, workingDays, daysPresent, overtimePay, bonus, otherDeduction);
 
       const payload = {
         user_id: processForm.user_id,
@@ -330,6 +375,10 @@ export default function PayrollPage() {
         amount_payable: calc.amountPayable,
         days_absent: daysAbsent,
         deduction_per_absent_day: 0,
+        overtime_hours: overtimeHours,
+        overtime_pay: overtimePay,
+        bonus,
+        other_deductions: otherDeduction,
         total_deducted: calc.totalDeducted,
         total_deductions: calc.totalDeducted,
         net_salary: calc.totalToPay,
@@ -858,6 +907,55 @@ const handleSaveSalaryStructure = async () => {
                   <div className="w-full border border-red-200 dark:border-red-800 rounded-xl px-3 py-2.5 text-sm bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 font-600">
                     {formatCurrency(livePreview.totalDeducted)}
                   </div>
+                </div>
+              </div>
+
+              {/* Row 4: average hours per day (from attendance), overtime hours (from attendance) */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Avg Hours / Day</label>
+                  <div className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
+                    {processForm.avg_hours_per_day ? `${processForm.avg_hours_per_day} h` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Overtime Hours</label>
+                  <input type="number" min="0" step="0.25" value={processForm.overtime_hours}
+                    onChange={e => setProcessForm(p => ({ ...p, overtime_hours: e.target.value }))}
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                </div>
+              </div>
+
+              {/* Row 5: overtime pay, bonus (extra pay) */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Overtime Pay (₹)</label>
+                  <input type="number" min="0" value={processForm.overtime_pay}
+                    onChange={e => setProcessForm(p => ({ ...p, overtime_pay: e.target.value }))}
+                    placeholder="0"
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                  {hourlyRate > 0 && (
+                    <p className="text-[11px] text-slate-400 mt-1">≈ {formatCurrency(hourlyRate)}/hr × {processForm.overtime_hours || 0} h</p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Bonus / Extra Pay (₹)</label>
+                  <input type="number" min="0" value={processForm.bonus}
+                    onChange={e => setProcessForm(p => ({ ...p, bonus: e.target.value }))}
+                    placeholder="0"
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                </div>
+              </div>
+
+              {/* Row 6: manual deduction */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Other Deduction (₹)</label>
+                  <input type="number" min="0" value={processForm.other_deduction}
+                    onChange={e => setProcessForm(p => ({ ...p, other_deduction: e.target.value }))}
+                    placeholder="0"
+                    className="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 text-sm bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-300" />
+                  <p className="text-[11px] text-slate-400 mt-1">Manual deduction, e.g. a fine or advance recovery.</p>
                 </div>
               </div>
 
