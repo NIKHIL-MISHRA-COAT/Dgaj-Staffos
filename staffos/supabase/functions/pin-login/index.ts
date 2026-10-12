@@ -49,10 +49,21 @@ serve(async (req) => {
     return json({ error: 'Enter your email and 4-digit PIN' }, 400);
   }
 
-  // Service role: the only caller allowed to check PINs or create sessions
+  // Service role: the only caller allowed to check PINs or create sessions.
+  // Newer projects expose the secret key as SUPABASE_SECRET_KEYS (a JSON map);
+  // older ones use SUPABASE_SERVICE_ROLE_KEY. Accept either.
+  const secretKeyFromMap = (() => {
+    try {
+      const map = JSON.parse(Deno.env.get('SUPABASE_SECRET_KEYS') ?? '{}');
+      return map?.default ?? (Object.values(map)[0] as string | undefined) ?? '';
+    } catch {
+      return '';
+    }
+  })();
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || secretKeyFromMap;
   const admin = createClient(
     Deno.env.get('SUPABASE_URL') ?? '',
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+    serviceKey,
     { auth: { autoRefreshToken: false, persistSession: false } }
   );
 
