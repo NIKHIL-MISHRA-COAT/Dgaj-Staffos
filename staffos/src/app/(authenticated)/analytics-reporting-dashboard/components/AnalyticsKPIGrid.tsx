@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { createClient } from '@/lib/supabase/client';
+import { useAnalyticsFilter } from './AnalyticsFilterContext';
 
 interface KPIValues {
   headcount: number | null;
@@ -29,32 +30,33 @@ export default function AnalyticsKPIGrid() {
   });
   const [loading, setLoading] = useState(true);
 
+  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
+
   useEffect(() => {
     fetchKPIs();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end, deptKey, refreshKey]);
 
   const fetchKPIs = async () => {
     setLoading(true);
     try {
-      const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
-      const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const inDept = (uid: string) => !deptUserIds || deptUserIds.has(uid);
 
       const [profilesRes, attendanceRes, ticketsRes, leavesRes, expensesRes, tasksRes] = await Promise.all([
         supabase.from('user_profiles').select('id', { count: 'exact' }).eq('is_active', true),
-        supabase.from('attendance_records').select('user_id, status, overtime_hours').gte('work_date', monthStart).lte('work_date', monthEnd),
+        supabase.from('attendance_records').select('user_id, status, overtime_hours').gte('work_date', start).lte('work_date', end),
         supabase.from('support_tickets').select('id', { count: 'exact' }).in('status', ['open', 'in_progress']),
         supabase.from('leave_requests').select('id', { count: 'exact' }).eq('status', 'pending'),
         supabase.from('expenses').select('id', { count: 'exact' }).eq('status', 'pending'),
-        supabase.from('tasks').select('id, status').gte('due_date', weekStart),
+        supabase.from('tasks').select('id, status, assigned_to').gte('due_date', start).lte('due_date', end),
       ]);
 
-      // Headcount
-      const headcount = profilesRes.count ?? 0;
+      // Headcount (selected department, or everyone)
+      const headcount = deptUserIds ? deptUserIds.size : (profilesRes.count ?? 0);
 
       // Avg attendance rate
-      const records = attendanceRes.data || [];
+      const records = (attendanceRes.data || []).filter((r) => inDept(r.user_id));
       const workingRecords = records.filter((r) => !['weekend', 'holiday'].includes(r.status));
       const presentRecords = workingRecords.filter((r) => ['present', 'late', 'half_day', 'work_from_home'].includes(r.status));
       const avgAttendanceRate = workingRecords.length > 0
@@ -77,7 +79,7 @@ export default function AnalyticsKPIGrid() {
       const pendingApprovals = (leavesRes.count ?? 0) + (expensesRes.count ?? 0);
 
       // Task completion rate
-      const allTasks = tasksRes.data || [];
+      const allTasks = (tasksRes.data || []).filter((t: any) => !t.assigned_to || inDept(t.assigned_to));
       const doneTasks = allTasks.filter((t) => t.status === 'done').length;
       const taskCompletionRate = allTasks.length > 0
         ? Math.round((doneTasks / allTasks.length) * 100)

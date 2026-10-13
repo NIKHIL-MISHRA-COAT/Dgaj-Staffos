@@ -11,6 +11,7 @@ import RedFlagPanel from './components/RedFlagPanel';
 import MonthlyHoursPerUserChart from './components/MonthlyHoursPerUserChart';
 import { useAuth } from '@/contexts/AuthContext';
 import { Lock, FileText, BarChart3 } from 'lucide-react';
+import { AnalyticsFilterProvider } from './components/AnalyticsFilterContext';
 
 function ReportsOnlyView() {
   return (
@@ -68,7 +69,7 @@ function FullAnalysisView() {
   );
 }
 
-export default function AnalyticsDashboardPage() {
+function AnalyticsDashboardContent() {
   const { pinSession } = useAuth();
   const role = pinSession?.role?.toLowerCase() || 'employee';
   const isDirector = role === 'director';
@@ -109,5 +110,14 @@ export default function AnalyticsDashboardPage() {
 
       {isDirector ? <FullAnalysisView /> : <ReportsOnlyView />}
     </div>
+  );
+}
+
+// The filter (date range, department) lives above both views, so it survives Refresh.
+export default function AnalyticsDashboardPage() {
+  return (
+    <AnalyticsFilterProvider>
+      <AnalyticsDashboardContent />
+    </AnalyticsFilterProvider>
   );
 }

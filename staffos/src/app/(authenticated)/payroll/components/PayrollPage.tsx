@@ -8,6 +8,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useVisibleFirms } from '@/lib/useVisibleFirms';
 import FirmFilterTabs from '@/components/FirmFilterTabs';
 import FirmBadge from '@/components/FirmBadge';
+import { buildHolidayMap, buildLeaveMap, computePeriodStats } from '@/lib/attendanceCalendar';
 
 interface PayrollRecord {
   id: string;
@@ -265,30 +266,38 @@ export default function PayrollPage() {
     setAutoFilling(true);
     try {
       const structure = getSalaryStructure(userId);
-      const { data } = await supabase.rpc('attendance_summary_for_period', {
-        p_user_id: userId, p_start: start, p_end: end,
-      });
-      const summary = Array.isArray(data) ? data[0] : data;
 
-      // Average hours per day worked and overtime hours, from the same period's attendance.
-      const { data: att } = await supabase
-        .from('attendance_records')
-        .select('total_hours, overtime_hours, status, clock_in')
-        .eq('user_id', userId)
-        .gte('work_date', start)
-        .lte('work_date', end);
-      const workedRows = (att || []).filter((r: any) => r.clock_in && Number(r.total_hours) > 0);
-      const totalWorked = workedRows.reduce((s: number, r: any) => s + Number(r.total_hours || 0), 0);
+      // Same company-calendar rules as the Attendance Records tab: working days =
+      // weekdays minus company holidays (weekly-off rows included); present = worked
+      // days on working days; paid leave is payable; absent = past working days with
+      // no work and no approved leave.
+      const [{ data: hols }, { data: att }, { data: leaves }] = await Promise.all([
+        supabase.from('company_holidays').select('name, holiday_date').gte('holiday_date', start).lte('holiday_date', end),
+        supabase.from('attendance_records')
+          .select('work_date, status, clock_in, total_hours, overtime_hours')
+          .eq('user_id', userId).gte('work_date', start).lte('work_date', end),
+        supabase.from('leave_requests')
+          .select('user_id, leave_type, start_date, end_date, status')
+          .eq('user_id', userId).in('status', ['approved', 'pending'])
+          .lte('start_date', end).gte('end_date', start),
+      ]);
+      const stats = computePeriodStats({
+        userId,
+        startDate: start,
+        endDate: end,
+        records: (att || []) as any[],
+        holidayMap: buildHolidayMap(hols || []),
+        leaveMap: buildLeaveMap((leaves || []) as any[], start, end),
+      });
       const overtimeTotal = (att || []).reduce((s: number, r: any) => s + Number(r.overtime_hours || 0), 0);
-      const avgHours = workedRows.length > 0 ? totalWorked / workedRows.length : 0;
 
       setProcessForm(p => ({
         ...p,
         total_salary: structure ? String(getTotalMonthlySalary(structure)) : p.total_salary,
-        working_days: summary ? String(summary.working_days) : p.working_days,
-        days_present: summary ? String(summary.days_present) : p.days_present,
-        days_absent: summary ? String(summary.days_absent) : p.days_absent,
-        avg_hours_per_day: workedRows.length > 0 ? avgHours.toFixed(2) : '',
+        working_days: String(stats.workingDays),
+        days_present: String(stats.workedDays + stats.paidLeaveDays),
+        days_absent: String(stats.absentDays),
+        avg_hours_per_day: stats.workedDays > 0 ? stats.avgHoursPerWorkedDay.toFixed(2) : '',
         overtime_hours: overtimeTotal > 0 ? overtimeTotal.toFixed(2) : '',
       }));
     } catch {

@@ -59,6 +59,37 @@ const ACTION_COLORS: Record<string, string> = {
   SELECT: 'bg-slate-100 text-slate-600',
 };
 
+// Descriptive actions (for example leave_approved, task_completed) get a colour by meaning
+const ACTION_OPTIONS: { value: string; label: string }[] = [
+  { value: 'leave_requested', label: 'Leave requested' },
+  { value: 'leave_approved', label: 'Leave approved' },
+  { value: 'leave_rejected', label: 'Leave rejected' },
+  { value: 'leave_cancelled', label: 'Leave cancelled' },
+  { value: 'leave_updated', label: 'Leave updated' },
+  { value: 'leave_balance_updated', label: 'Leave balance updated' },
+  { value: 'task_created', label: 'Task created' },
+  { value: 'task_updated', label: 'Task updated' },
+  { value: 'task_status_updated', label: 'Task status updated' },
+  { value: 'task_completed', label: 'Task completed' },
+  { value: 'task_deleted', label: 'Task deleted' },
+  { value: 'attendance_clock_in', label: 'Clock in' },
+  { value: 'attendance_clock_out', label: 'Clock out' },
+  { value: 'attendance_updated', label: 'Attendance updated' },
+  { value: 'user_created', label: 'User created' },
+  { value: 'user_updated', label: 'User updated' },
+  { value: 'INSERT', label: 'Insert (older)' },
+  { value: 'UPDATE', label: 'Update (older)' },
+  { value: 'DELETE', label: 'Delete (older)' },
+];
+
+function actionBadgeClass(action: string): string {
+  if (ACTION_COLORS[action]) return ACTION_COLORS[action];
+  if (/approved|completed|created|requested|clock_in/.test(action)) return 'bg-emerald-100 text-emerald-700';
+  if (/rejected|cancelled|deleted/.test(action)) return 'bg-red-100 text-red-700';
+  if (/updated|status/.test(action)) return 'bg-blue-100 text-blue-700';
+  return 'bg-slate-100 text-slate-600';
+}
+
 function downloadCSV(filename: string, headers: string[], rows: any[][]) {
   const escape = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const lines = [headers.map(escape).join(','), ...rows.map(r => r.map(escape).join(','))];
@@ -302,9 +333,7 @@ export default function AuditLogPage() {
             <select value={actionFilter} onChange={e => { setActionFilter(e.target.value); setPage(0); }}
               className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-2 outline-none focus:ring-2 focus:ring-slate-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200">
               <option value="all">All Actions</option>
-              <option value="INSERT">Insert</option>
-              <option value="UPDATE">Update</option>
-              <option value="DELETE">Delete</option>
+              {ACTION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
         </div>
@@ -363,7 +392,7 @@ export default function AuditLogPage() {
                       )}
                     </td>
                     <td className="px-3 py-2.5 whitespace-nowrap">
-                      <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${ACTION_COLORS[entry.action] || 'bg-slate-100 text-slate-600'}`}>{entry.action}</span>
+                      <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${actionBadgeClass(entry.action)}`}>{entry.action}</span>
                     </td>
                     <td className="px-3 py-2.5 whitespace-nowrap">
                       <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${MODULE_COLORS[entry.module || ''] || 'bg-slate-100 text-slate-600'}`}>{entry.module || entry.table_name || '—'}</span>
@@ -412,7 +441,7 @@ export default function AuditLogPage() {
                 </div>
                 <div className="bg-slate-50 dark:bg-slate-700/40 rounded-lg p-3">
                   <p className="text-slate-400 mb-0.5">Action</p>
-                  <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${ACTION_COLORS[viewingEntry.action] || 'bg-slate-100 text-slate-600'}`}>{viewingEntry.action}</span>
+                  <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${actionBadgeClass(viewingEntry.action)}`}>{viewingEntry.action}</span>
                 </div>
                 <div className="bg-slate-50 dark:bg-slate-700/40 rounded-lg p-3">
                   <p className="text-slate-400 mb-0.5">Module / Table</p>

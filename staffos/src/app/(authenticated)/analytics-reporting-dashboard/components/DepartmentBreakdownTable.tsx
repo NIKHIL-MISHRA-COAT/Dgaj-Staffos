@@ -4,6 +4,10 @@ import React, { useEffect, useState } from 'react';
 import { ChevronUp, ChevronDown, ArrowUpDown, TrendingUp, TrendingDown, BarChart2 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
+import { useAnalyticsFilter, ALL_DEPARTMENTS } from './AnalyticsFilterContext';
+
+// Local date string (YYYY-MM-DD). Not toISOString(): that shifts dates in IST.
+const toLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 function downloadCSV(data: any[], filename: string) {
   if (!data || data.length === 0) { toast.error('No data to export'); return; }
@@ -49,22 +53,22 @@ export default function DepartmentBreakdownTable() {
   const [sortKey, setSortKey] = useState<SortKey>('department');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
+  const { start, end, department, refreshKey } = useAnalyticsFilter();
+
   useEffect(() => {
     fetchData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end, department, refreshKey]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
+      const today = toLocal(new Date());
 
       const [profilesRes, attendanceTodayRes, attendanceMonthRes, ticketsRes, leavesRes, tasksRes] = await Promise.all([
         supabase.from('user_profiles').select('id, department').eq('is_active', true),
         supabase.from('attendance_records').select('user_id, status').eq('work_date', today),
-        supabase.from('attendance_records').select('user_id, status, overtime_hours').gte('work_date', monthStart).lte('work_date', monthEnd),
+        supabase.from('attendance_records').select('user_id, status, overtime_hours').gte('work_date', start).lte('work_date', end),
         supabase.from('support_tickets').select('user_id').in('status', ['open', 'in_progress']),
         supabase.from('leave_requests').select('user_id').eq('status', 'pending'),
         supabase.from('tasks').select('assigned_to, status'),
@@ -82,7 +86,8 @@ export default function DepartmentBreakdownTable() {
       profiles.forEach((p) => { if (p.department) userDeptMap[p.id] = p.department; });
 
       // Group by department
-      const depts = [...new Set(profiles.map((p) => p.department).filter(Boolean))] as string[];
+      const depts = ([...new Set(profiles.map((p) => p.department).filter(Boolean))] as string[])
+        .filter((d) => department === ALL_DEPARTMENTS || d === department);
 
       const rows: DeptRow[] = depts.map((dept) => {
         const deptUsers = profiles.filter((p) => p.department === dept).map((p) => p.id);

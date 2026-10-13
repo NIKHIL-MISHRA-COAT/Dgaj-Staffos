@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { BarChart2 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { createClient } from '@/lib/supabase/client';
+import { useAnalyticsFilter } from './AnalyticsFilterContext';
 
 interface DeptData {
   department: string;
@@ -23,17 +24,17 @@ export default function DepartmentProductivityChart() {
   const [chartData, setChartData] = useState<DeptData[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
+
   useEffect(() => {
     fetchData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end, deptKey, refreshKey]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
-
       const { data: profiles } = await supabase
         .from('user_profiles')
         .select('id, department')
@@ -42,14 +43,16 @@ export default function DepartmentProductivityChart() {
       const { data: attendance } = await supabase
         .from('attendance_records')
         .select('user_id, status')
-        .gte('work_date', monthStart)
-        .lte('work_date', monthEnd);
+        .gte('work_date', start)
+        .lte('work_date', end);
 
       if (!profiles || !attendance) return;
 
-      // Map user → department
+      // Map user → department (only the selected department when one is chosen)
       const userDeptMap: Record<string, string> = {};
-      profiles.forEach((p) => { if (p.department) userDeptMap[p.id] = p.department; });
+      profiles.forEach((p) => {
+        if (p.department && (!deptUserIds || deptUserIds.has(p.id))) userDeptMap[p.id] = p.department;
+      });
 
       // Group attendance by department
       const deptStats: Record<string, { total: number; present: number }> = {};

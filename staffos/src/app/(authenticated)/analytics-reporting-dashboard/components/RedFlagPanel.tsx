@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { Toaster } from 'sonner';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { createClient } from '@/lib/supabase/client';
+import { useAnalyticsFilter } from './AnalyticsFilterContext';
 
 type FlagType = 'attendance' | 'productivity' | 'overdue-tasks' | 'turnover-risk';
 
@@ -45,27 +46,30 @@ export default function RedFlagPanel() {
     'turnover-risk': { icon: UserX, labelKey: 'turnoverRisk', color: 'text-red-600' },
   };
 
+  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
+
   useEffect(() => {
     fetchRedFlags();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end, deptKey, refreshKey]);
 
   const fetchRedFlags = async () => {
     setLoading(true);
     try {
       const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
-      const today = now.toISOString().split('T')[0];
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const inDept = (uid: string) => !deptUserIds || deptUserIds.has(uid);
 
       const [profilesRes, attendanceRes, tasksRes] = await Promise.all([
         supabase.from('user_profiles').select('id, full_name, department').eq('is_active', true),
-        supabase.from('attendance_records').select('user_id, status, work_date').gte('work_date', monthStart).lte('work_date', monthEnd),
+        supabase.from('attendance_records').select('user_id, status, work_date').gte('work_date', start).lte('work_date', end),
         supabase.from('tasks').select('assigned_to, status, due_date, title').neq('status', 'done'),
       ]);
 
-      const profiles = profilesRes.data || [];
-      const attendance = attendanceRes.data || [];
-      const tasks = tasksRes.data || [];
+      const profiles = (profilesRes.data || []).filter((p: any) => inDept(p.id));
+      const attendance = (attendanceRes.data || []).filter((r: any) => inDept(r.user_id));
+      const tasks = (tasksRes.data || []).filter((t: any) => !t.assigned_to || inDept(t.assigned_to));
 
       const flags: RedFlag[] = [];
 
@@ -91,7 +95,7 @@ export default function RedFlagPanel() {
             department: p.department || 'General',
             initials: getInitials(p.full_name),
             flagType: 'attendance',
-            detail: `${Math.round(rate * 100)}% attendance this month (${att.absent} absences)`,
+            detail: `${Math.round(rate * 100)}% attendance in selected period (${att.absent} absences)`,
             severity: rate < 0.4 ? 'critical' : 'high',
             daysSince: 1,
           });
@@ -119,7 +123,7 @@ export default function RedFlagPanel() {
             department: p.department || 'General',
             initials: getInitials(p.full_name),
             flagType: 'turnover-risk',
-            detail: `Consistently low engagement — ${att.absent} absences this month`,
+            detail: `Consistently low engagement — ${att.absent} absences in selected period`,
             severity: 'critical',
             daysSince: 3,
           });

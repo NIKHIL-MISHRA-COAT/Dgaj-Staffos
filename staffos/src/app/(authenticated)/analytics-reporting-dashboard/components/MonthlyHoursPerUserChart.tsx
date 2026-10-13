@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { BarChart2, Download, RefreshCw, Users } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAnalyticsFilter } from './AnalyticsFilterContext';
 
 interface UserMonthlyHoursRow {
   user_id: string;
@@ -32,24 +33,19 @@ export default function MonthlyHoursPerUserChart() {
   const supabase = createClient();
   const [data, setData] = useState<UserMonthlyHoursRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [monthFilter, setMonthFilter] = useState<string>(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  });
+  // Period and department come from the page filter (shared with every chart)
+  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [year, month] = monthFilter.split('-');
-      const startDate = `${year}-${month}-01`;
-      const endDate = new Date(parseInt(year), parseInt(month), 0).toISOString().split('T')[0];
-
       const [attRes, profilesRes] = await Promise.all([
         supabase
           .from('attendance_records')
           .select('user_id, total_hours, overtime_hours, status')
-          .gte('work_date', startDate)
-          .lte('work_date', endDate),
+          .gte('work_date', start)
+          .lte('work_date', end),
         supabase
           .from('user_profiles')
           .select('id, full_name, department')
@@ -60,7 +56,7 @@ export default function MonthlyHoursPerUserChart() {
       const empMap = new Map(profiles.map((p: any) => [p.id, p]));
 
       const userMap: Record<string, UserMonthlyHoursRow> = {};
-      (attRes.data || []).forEach((r: any) => {
+      (attRes.data || []).filter((r: any) => !deptUserIds || deptUserIds.has(r.user_id)).forEach((r: any) => {
         const emp = empMap.get(r.user_id) as any;
         if (!userMap[r.user_id]) {
           userMap[r.user_id] = {
@@ -87,7 +83,7 @@ export default function MonthlyHoursPerUserChart() {
     } finally {
       setLoading(false);
     }
-  }, [monthFilter]);
+  }, [start, end, deptKey, refreshKey]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -103,7 +99,7 @@ export default function MonthlyHoursPerUserChart() {
       String(u.absent_days),
       String(u.late_days),
     ]);
-    downloadCSV(`monthly_hours_${monthFilter}.csv`, headers, rows);
+    downloadCSV(`monthly_hours_${start}_to_${end}.csv`, headers, rows);
     toast.success('Monthly hours exported');
   };
 
@@ -116,16 +112,10 @@ export default function MonthlyHoursPerUserChart() {
           <BarChart2 size={16} className="text-indigo-500" />
           <div>
             <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Monthly Attendance Hours</h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Hours worked per employee this month</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Hours worked per employee · {start} to {end}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <input
-            type="month"
-            value={monthFilter}
-            onChange={(e) => setMonthFilter(e.target.value)}
-            className="text-xs border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-300"
-          />
           <button onClick={fetchData} disabled={loading} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors text-slate-500">
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
