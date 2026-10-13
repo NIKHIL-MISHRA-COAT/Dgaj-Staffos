@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { CalendarDays } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { createClient } from '@/lib/supabase/client';
+import { useAnalyticsFilter } from './AnalyticsFilterContext';
 
 interface LeaveData {
   type: string;
@@ -27,28 +28,29 @@ export default function LeavePatternChart() {
   const [chartData, setChartData] = useState<LeaveData[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
+
   useEffect(() => {
     fetchData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end, deptKey, refreshKey]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const currentYear = new Date().getFullYear();
-      const yearStart = `${currentYear}-01-01`;
-      const yearEnd = `${currentYear}-12-31`;
-
+      // Approved leave that overlaps the selected range
       const { data, error } = await supabase
         .from('leave_requests')
-        .select('leave_type, total_days')
+        .select('user_id, leave_type, total_days')
         .eq('status', 'approved')
-        .gte('start_date', yearStart)
-        .lte('end_date', yearEnd);
+        .lte('start_date', end)
+        .gte('end_date', start);
 
       if (error) throw error;
 
       const typeMap: Record<string, number> = {};
-      (data || []).forEach((r) => {
+      (data || []).filter((r) => !deptUserIds || deptUserIds.has(r.user_id)).forEach((r) => {
         typeMap[r.leave_type] = (typeMap[r.leave_type] || 0) + (r.total_days || 1);
       });
 
@@ -73,7 +75,7 @@ export default function LeavePatternChart() {
       <div className="flex items-start justify-between mb-5">
         <div>
           <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Leave Patterns</h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Leave days taken by type · {new Date().getFullYear()}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Leave days taken by type · {start} to {end}</p>
         </div>
       </div>
 

@@ -6,11 +6,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import Icon from '@/components/ui/AppIcon';
-
-
-
-const dateRanges = ['Last 7 days', 'Last 30 days', 'This Quarter', 'Last Quarter', 'This Year', 'Custom Range'];
-const departments = ['All Departments', 'Engineering', 'Product', 'HR & Operations', 'Sales', 'Finance', 'Marketing'];
+import { DATE_RANGES, ALL_DEPARTMENTS, useAnalyticsFilter } from './AnalyticsFilterContext';
 
 function downloadCSV(data: any[], filename: string) {
   if (!data || data.length === 0) { toast.error('No data to export'); return; }
@@ -34,8 +30,10 @@ function downloadCSV(data: any[], filename: string) {
 }
 
 export default function AnalyticsHeader() {
-  const [dateRange, setDateRange] = useState('Last 30 days');
-  const [department, setDepartment] = useState('All Departments');
+  const {
+    dateRange, setDateRange, customStart, customEnd, setCustomRange,
+    start, end, department, setDepartment, departments, refresh,
+  } = useAnalyticsFilter();
   const [showDateMenu, setShowDateMenu] = useState(false);
   const [showDeptMenu, setShowDeptMenu] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -43,27 +41,8 @@ export default function AnalyticsHeader() {
   const { t } = useLanguage();
   const supabase = createClient();
 
-  const getDateRange = () => {
-    const now = new Date();
-    let start: string;
-    const end = now.toISOString().split('T')[0];
-    if (dateRange === 'Last 7 days') start = new Date(now.getTime() - 7 * 86400000).toISOString().split('T')[0];
-    else if (dateRange === 'Last 30 days') start = new Date(now.getTime() - 30 * 86400000).toISOString().split('T')[0];
-    else if (dateRange === 'This Quarter') {
-      const q = Math.floor(now.getMonth() / 3);
-      start = new Date(now.getFullYear(), q * 3, 1).toISOString().split('T')[0];
-    } else if (dateRange === 'Last Quarter') {
-      const q = Math.floor(now.getMonth() / 3);
-      const lq = q === 0 ? 3 : q - 1;
-      const ly = q === 0 ? now.getFullYear() - 1 : now.getFullYear();
-      start = new Date(ly, lq * 3, 1).toISOString().split('T')[0];
-    } else if (dateRange === 'This Year') {
-      start = `${now.getFullYear()}-01-01`;
-    } else {
-      start = new Date(now.getTime() - 30 * 86400000).toISOString().split('T')[0];
-    }
-    return { start, end };
-  };
+  // Same range the charts use, so exports match what is on screen
+  const getDateRange = () => ({ start, end });
 
   const exportAttendance = async () => {
     setExporting(true);
@@ -227,16 +206,31 @@ export default function AnalyticsHeader() {
             <ChevronDown size={13} />
           </button>
           {showDateMenu && (
-            <div className="absolute right-0 top-full mt-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-modal py-1 z-20 min-w-[180px]">
-              {dateRanges?.map((r) => (
+            <div className="absolute right-0 top-full mt-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-modal py-1 z-20 min-w-[220px]">
+              {DATE_RANGES.map((r) => (
                 <button
                   key={`range-${r}`}
-                  onClick={() => { setDateRange(r); setShowDateMenu(false); }}
+                  onClick={() => { setDateRange(r); if (r !== 'Custom Range') setShowDateMenu(false); }}
                   className={`w-full text-left px-4 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors ${dateRange === r ? 'text-blue-600 font-600' : 'text-slate-700 dark:text-slate-300'}`}
                 >
                   {r}
                 </button>
               ))}
+              {dateRange === 'Custom Range' && (
+                <div className="px-4 py-2 border-t border-slate-100 dark:border-slate-700 space-y-2">
+                  <label className="block text-xs text-slate-500">From
+                    <input type="date" value={customStart} max={customEnd || undefined}
+                      onChange={(e) => setCustomRange(e.target.value, customEnd)}
+                      className="mt-0.5 w-full text-xs border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
+                  </label>
+                  <label className="block text-xs text-slate-500">To
+                    <input type="date" value={customEnd} min={customStart || undefined}
+                      onChange={(e) => setCustomRange(customStart, e.target.value)}
+                      className="mt-0.5 w-full text-xs border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
+                  </label>
+                  <button onClick={() => setShowDateMenu(false)} className="w-full text-xs font-600 text-blue-600 py-1">Apply</button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -252,7 +246,7 @@ export default function AnalyticsHeader() {
           </button>
           {showDeptMenu && (
             <div className="absolute right-0 top-full mt-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-modal py-1 z-20 min-w-[200px]">
-              {departments?.map((d) => (
+              {[ALL_DEPARTMENTS, ...departments].map((d) => (
                 <button
                   key={`dept-${d}`}
                   onClick={() => { setDepartment(d); setShowDeptMenu(false); }}
@@ -265,7 +259,7 @@ export default function AnalyticsHeader() {
           )}
         </div>
 
-        <button onClick={() => window.location.reload()} className="btn-ghost text-xs gap-1.5 border border-slate-200 dark:border-slate-700">
+        <button onClick={refresh} className="btn-ghost text-xs gap-1.5 border border-slate-200 dark:border-slate-700">
           <RefreshCw size={13} />
           {t('refresh')}
         </button>

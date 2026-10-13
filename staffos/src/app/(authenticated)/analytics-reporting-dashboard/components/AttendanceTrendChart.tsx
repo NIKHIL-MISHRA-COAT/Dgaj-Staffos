@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { BarChart2 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { createClient } from '@/lib/supabase/client';
+import { useAnalyticsFilter } from './AnalyticsFilterContext';
 
 interface DayData {
   date: string;
@@ -17,30 +18,29 @@ export default function AttendanceTrendChart() {
   const [chartData, setChartData] = useState<DayData[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const { start, end, department, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
+
   useEffect(() => {
     fetchData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, end, deptKey, refreshKey]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const today = new Date();
-      const thirtyDaysAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-      const startDate = thirtyDaysAgo.toISOString().split('T')[0];
-      const endDate = today.toISOString().split('T')[0];
-
       const { data, error } = await supabase
         .from('attendance_records')
-        .select('work_date, status')
-        .gte('work_date', startDate)
-        .lte('work_date', endDate)
+        .select('user_id, work_date, status')
+        .gte('work_date', start)
+        .lte('work_date', end)
         .order('work_date', { ascending: true });
 
       if (error) throw error;
 
-      // Group by date
+      // Group by date (selected department, or everyone)
       const dateMap: Record<string, { present: number; late: number; absent: number }> = {};
-      (data || []).forEach((r) => {
+      (data || []).filter((r) => !deptUserIds || deptUserIds.has(r.user_id)).forEach((r) => {
         if (!dateMap[r.work_date]) dateMap[r.work_date] = { present: 0, late: 0, absent: 0 };
         if (['present', 'work_from_home', 'half_day'].includes(r.status)) dateMap[r.work_date].present++;
         else if (r.status === 'late') dateMap[r.work_date].late++;
@@ -50,10 +50,9 @@ export default function AttendanceTrendChart() {
       // Build last 14 days with data
       const result: DayData[] = Object.entries(dateMap)
         .map(([date, counts]) => ({
-          date: new Date(date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
+          date: new Date(`${date}T00:00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
           ...counts,
-        }))
-        .slice(-14);
+        }));
 
       setChartData(result);
     } catch (err) {
@@ -70,7 +69,7 @@ export default function AttendanceTrendChart() {
       <div className="flex items-start justify-between mb-5">
         <div>
           <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Attendance Trend</h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Last 30 days · All employees</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{start} to {end} · {department}</p>
         </div>
         <div className="flex items-center gap-3 text-xs flex-wrap justify-end">
           <span className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400"><span className="w-3 h-2 bg-emerald-500 rounded-sm" />Present</span>

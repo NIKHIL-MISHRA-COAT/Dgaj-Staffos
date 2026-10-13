@@ -467,6 +467,7 @@ export default function AttendanceRecords() {
   const autoCheckouts = ownRecords.filter(r => (r as any).is_auto_checkout).length;
 
   const [filterYear, filterMonth] = monthFilter.split('-').map(Number);
+  const daysInMonth = new Date(filterYear, filterMonth, 0).getDate();
   const monthStart = `${filterYear}-${pad2(filterMonth)}-01`;
   const monthEnd = toDateStr(new Date(filterYear, filterMonth, 0));
   // Working days come from the company calendar: weekends and company holidays
@@ -688,7 +689,8 @@ export default function AttendanceRecords() {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 mb-5 w-fit flex-wrap">
+      <div className="flex flex-wrap items-center gap-3 mb-5">
+      <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 w-fit flex-wrap">
         {[
           { id: 'history', label: 'History', icon: Calendar },
           { id: 'corrections', label: 'My Corrections', icon: Pencil },
@@ -709,6 +711,22 @@ export default function AttendanceRecords() {
             {tab.label}
           </button>
         ))}
+      </div>
+
+      {/* Who the History list shows: managers and directors switch between their own and the team's records here */}
+      {isManager && activeTab === 'history' && (
+        <div className="flex items-center gap-0.5 bg-slate-100 rounded-xl p-1 w-fit">
+          {(['mine', 'team'] as const).map((scope) => (
+            <button
+              key={scope}
+              onClick={() => setHistoryScope(scope)}
+              className={`px-4 py-2 rounded-lg text-sm font-500 transition-all ${historyScope === scope ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              {scope === 'mine' ? 'My Records' : 'Team Records'}
+            </button>
+          ))}
+        </div>
+      )}
       </div>
 
       {/* History Tab */}
@@ -736,19 +754,6 @@ export default function AttendanceRecords() {
                 </button>
               ))}
             </div>
-            {isManager && (
-              <div className="flex items-center gap-0.5 bg-slate-100 rounded-lg p-0.5">
-                {(['mine', 'team'] as const).map((scope) => (
-                  <button
-                    key={scope}
-                    onClick={() => setHistoryScope(scope)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-500 transition-all ${historyScope === scope ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                  >
-                    {scope === 'mine' ? 'My Records' : 'Team Records'}
-                  </button>
-                ))}
-              </div>
-            )}
             <button
               onClick={() => openCorrectionModal()}
               className="ml-auto btn-ghost border border-slate-200 text-xs py-1.5 px-3 flex items-center gap-1.5"

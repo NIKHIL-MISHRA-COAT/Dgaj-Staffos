@@ -58,6 +58,7 @@ export default function EmployeeDocumentsPanel({ employeeId, employeeName, reque
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -65,6 +66,7 @@ export default function EmployeeDocumentsPanel({ employeeId, employeeName, reque
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const [reqRes, docRes] = await Promise.all([
         supabase
@@ -83,7 +85,9 @@ export default function EmployeeDocumentsPanel({ employeeId, employeeName, reque
       setRequests((reqRes.data || []) as RequestRow[]);
       setDocs((docRes.data || []) as DocRow[]);
     } catch (err: any) {
-      toast.error('Could not load documents: ' + (err?.message || 'unknown error'));
+      const msg = err?.message || 'unknown error';
+      console.error('Document load error:', err);
+      setLoadError(msg);
     } finally {
       setLoading(false);
     }
@@ -200,6 +204,12 @@ export default function EmployeeDocumentsPanel({ employeeId, employeeName, reque
             </button>
           </div>
         </form>
+      )}
+
+      {loadError && (
+        <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          Could not load documents: {loadError}
+        </div>
       )}
 
       {loading ? (

@@ -71,6 +71,8 @@ interface TaskDateGroup {
   pendingCount: number;
 }
 
+type DatePreset = 'today' | 'yesterday' | 'last7' | 'last30' | 'thisMonth' | 'custom';
+
 export default function ReportsPage() {
   const { effectiveUserId } = useAuth();
   const supabase = createClient();
@@ -89,8 +91,29 @@ export default function ReportsPage() {
   });
 
   // Filters
-  const [dateFrom, setDateFrom] = useState(() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return d.toISOString().split('T')[0]; });
-  const [dateTo, setDateTo] = useState(() => new Date().toISOString().split('T')[0]);
+  // Local dates (not toISOString, which shifts the date in IST). Opens on Today.
+  const ymdLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const daysFromToday = (n: number) => { const d = new Date(); d.setDate(d.getDate() + n); return ymdLocal(d); };
+  const presetRange = (p: Exclude<DatePreset, 'custom'>): { from: string; to: string } => {
+    const today = new Date();
+    switch (p) {
+      case 'today': return { from: daysFromToday(0), to: daysFromToday(0) };
+      case 'yesterday': return { from: daysFromToday(-1), to: daysFromToday(-1) };
+      case 'last7': return { from: daysFromToday(-6), to: daysFromToday(0) };
+      case 'last30': return { from: daysFromToday(-29), to: daysFromToday(0) };
+      case 'thisMonth': return { from: ymdLocal(new Date(today.getFullYear(), today.getMonth(), 1)), to: daysFromToday(0) };
+    }
+  };
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [dateFrom, setDateFrom] = useState(() => daysFromToday(0));
+  const [dateTo, setDateTo] = useState(() => daysFromToday(0));
+  const applyPreset = (p: DatePreset) => {
+    setDatePreset(p);
+    if (p === 'custom') return;
+    const r = presetRange(p);
+    setDateFrom(r.from);
+    setDateTo(r.to);
+  };
   const [userFilter, setUserFilter] = useState('all');
   const [deptFilter, setDeptFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -745,15 +768,27 @@ export default function ReportsPage() {
 
       {/* Filters */}
       <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-4 mb-5 shadow-sm">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Period</label>
+            <select value={datePreset} onChange={e => applyPreset(e.target.value as DatePreset)}
+              className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-2 outline-none focus:ring-2 focus:ring-blue-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200">
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="last7">Last 7 days</option>
+              <option value="last30">Last 30 days</option>
+              <option value="thisMonth">This month</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
           <div>
             <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">From</label>
-            <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+            <input type="date" value={dateFrom} onChange={e => { setDatePreset('custom'); setDateFrom(e.target.value); }}
               className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-2 outline-none focus:ring-2 focus:ring-blue-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">To</label>
-            <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+            <input type="date" value={dateTo} onChange={e => { setDatePreset('custom'); setDateTo(e.target.value); }}
               className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2.5 py-2 outline-none focus:ring-2 focus:ring-blue-300 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200" />
           </div>
           <div>

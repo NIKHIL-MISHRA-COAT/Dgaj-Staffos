@@ -8,7 +8,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
-export const DATE_RANGES = ['Last 7 days', 'Last 30 days', 'This Quarter', 'Last Quarter', 'This Year', 'Custom Range'] as const;
+export const DATE_RANGES = ['Today', 'Last 7 days', 'Last 30 days', 'This Quarter', 'Last Quarter', 'This Year', 'Custom Range'] as const;
 export type DateRangeLabel = typeof DATE_RANGES[number];
 export const ALL_DEPARTMENTS = 'All Departments';
 
@@ -18,11 +18,19 @@ const pad2 = (n: number) => String(n).padStart(2, '0');
 const toLocalStr = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const daysAgo = (n: number) => { const d = new Date(); d.setDate(d.getDate() - n); return toLocalStr(d); };
 
+// 'YYYY-MM-DD' -> '13 Oct 2026'
+export function fmtYmd(ymd: string): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 export function computeRange(label: DateRangeLabel, custom: { start: string; end: string }): { start: string; end: string } {
   const now = new Date();
   const today = toLocalStr(now);
   const q = Math.floor(now.getMonth() / 3);
   switch (label) {
+    case 'Today':
+      return { start: today, end: today };
     case 'Last 7 days':
       return { start: daysAgo(6), end: today };
     case 'Last 30 days':
@@ -52,6 +60,7 @@ interface AnalyticsFilterValue {
   setCustomRange: (start: string, end: string) => void;
   start: string;                       // YYYY-MM-DD, inclusive
   end: string;                         // YYYY-MM-DD, inclusive
+  rangeLabel: string;                  // e.g. "Last 30 days (14 Sep 2026 – 13 Oct 2026)" or "Today (13 Oct 2026)"
   department: string;                  // 'All Departments' or a department name
   setDepartment: (d: string) => void;
   departments: string[];               // real departments from user_profiles
@@ -72,10 +81,17 @@ export function AnalyticsFilterProvider({ children }: { children: React.ReactNod
   const [deptUserIds, setDeptUserIds] = useState<Set<string> | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Recomputed on every refresh, so "Today" and the relative ranges move with the clock
   const range = useMemo(
     () => computeRange(dateRange, { start: customStart, end: customEnd }),
-    [dateRange, customStart, customEnd, refreshKey], // refreshKey: "today" moves forward on refresh
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dateRange, customStart, customEnd, refreshKey],
   );
+
+  const rangeLabel = useMemo(() => {
+    if (dateRange === 'Today') return `Today (${fmtYmd(range.end)})`;
+    return `${dateRange} (${fmtYmd(range.start)} – ${fmtYmd(range.end)})`;
+  }, [dateRange, range]);
 
   // Departments and the users in the selected department
   useEffect(() => {
@@ -108,6 +124,7 @@ export function AnalyticsFilterProvider({ children }: { children: React.ReactNod
     setCustomRange,
     start: range.start,
     end: range.end,
+    rangeLabel,
     department,
     setDepartment,
     departments,

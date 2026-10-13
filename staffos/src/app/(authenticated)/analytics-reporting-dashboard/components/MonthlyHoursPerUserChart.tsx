@@ -34,7 +34,7 @@ export default function MonthlyHoursPerUserChart() {
   const [data, setData] = useState<UserMonthlyHoursRow[]>([]);
   const [loading, setLoading] = useState(true);
   // Period and department come from the page filter (shared with every chart)
-  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const { start, end, rangeLabel, deptUserIds, refreshKey } = useAnalyticsFilter();
   const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
 
   const fetchData = useCallback(async () => {
@@ -100,7 +100,7 @@ export default function MonthlyHoursPerUserChart() {
       String(u.late_days),
     ]);
     downloadCSV(`monthly_hours_${start}_to_${end}.csv`, headers, rows);
-    toast.success('Monthly hours exported');
+    toast.success('Attendance hours exported');
   };
 
   const maxHours = data.length > 0 ? Math.max(...data.map((u) => u.total_hours)) : 1;
@@ -111,8 +111,8 @@ export default function MonthlyHoursPerUserChart() {
         <div className="flex items-center gap-2">
           <BarChart2 size={16} className="text-indigo-500" />
           <div>
-            <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Monthly Attendance Hours</h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Hours worked per employee · {start} to {end}</p>
+            <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Attendance Hours</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Hours worked per employee · {rangeLabel}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -136,7 +136,7 @@ export default function MonthlyHoursPerUserChart() {
       ) : data.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-48 text-center">
           <Users size={28} className="text-slate-300 dark:text-slate-600 mb-2" />
-          <p className="text-sm font-500 text-slate-500 dark:text-slate-400">No attendance data for this month</p>
+          <p className="text-sm font-500 text-slate-500 dark:text-slate-400">No attendance data for the selected range</p>
         </div>
       ) : (
         <div className="space-y-2 max-h-80 overflow-y-auto pr-1">

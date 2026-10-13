@@ -24,7 +24,7 @@ export default function DepartmentProductivityChart() {
   const [chartData, setChartData] = useState<DeptData[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const { start, end, rangeLabel, deptUserIds, refreshKey } = useAnalyticsFilter();
   const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
 
   useEffect(() => {
@@ -89,7 +89,7 @@ export default function DepartmentProductivityChart() {
       <div className="flex items-start justify-between mb-5">
         <div>
           <h3 className="text-base font-600 text-slate-900 dark:text-slate-100">Department Productivity</h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Avg score per department · Current month</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Avg score per department · {rangeLabel}</p>
         </div>
         <div className="flex items-center gap-3 text-[11px] flex-wrap text-slate-500 dark:text-slate-400">
           <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" />≥85</span>

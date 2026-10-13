@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 import { AlertTriangle, MapPinOff, WifiOff, Download, RefreshCw, ChevronLeft, Calendar, Users, Clock, BarChart2 } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import Icon from '@/components/ui/AppIcon';
+import { buildHolidayMap, buildLeaveMap, computePeriodStats } from '@/lib/attendanceCalendar';
 
 interface AuditEmployee {
   id: string;
@@ -61,11 +62,15 @@ interface UserMonthlyHoursSummary {
   user_id: string;
   full_name: string;
   department: string;
-  total_hours: number;
-  overtime_hours: number;
-  present_days: number;
-  absent_days: number;
+  working_days: number;      // company calendar working days in the period
+  present_days: number;      // worked days: present, late, half day, WFH
+  absent_days: number;       // past working days with no work and no approved leave
   late_days: number;
+  paid_leave_days: number;
+  unpaid_leave_days: number;
+  avg_hours_per_day: number; // worked hours / worked days
+  total_hours: number;       // incl. overtime
+  overtime_hours: number;
 }
 
 type TabId = 'violations' | 'out_of_radius' | 'gps_downtime' | 'monthly_hours';
@@ -105,24 +110,38 @@ function downloadCSV(filename: string, headers: string[], rows: string[][]) {
   URL.revokeObjectURL(url);
 }
 
+type AuditDatePreset = 'today' | 'yesterday' | 'last7' | 'thisMonth' | 'custom';
+
 export default function AttendanceAudit() {
   const { user, pinSession, effectiveUserId } = useAuth();
   const router = useRouter();
   const supabase = createClient();
 
-  const [activeTab, setActiveTab] = useState<TabId>('violations');
-  const [dateFrom, setDateFrom] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 29);
-    return d.toISOString().split('T')[0];
-  });
-  const [dateTo, setDateTo] = useState(() => new Date().toISOString().split('T')[0]);
+  const [activeTab, setActiveTab] = useState<TabId>('monthly_hours');
+  // Local dates (toISOString shifts the date in IST before 5:30 am). Opens on Today.
+  const ymdLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const daysFromToday = (n: number) => { const d = new Date(); d.setDate(d.getDate() + n); return ymdLocal(d); };
+  const presetRange = (p: AuditDatePreset): { from: string; to: string } => {
+    switch (p) {
+      case 'today': return { from: daysFromToday(0), to: daysFromToday(0) };
+      case 'yesterday': return { from: daysFromToday(-1), to: daysFromToday(-1) };
+      case 'last7': return { from: daysFromToday(-6), to: daysFromToday(0) };
+      case 'thisMonth': return { from: ymdLocal(new Date(new Date().getFullYear(), new Date().getMonth(), 1)), to: daysFromToday(0) };
+      default: return { from: daysFromToday(0), to: daysFromToday(0) };
+    }
+  };
+  const [datePreset, setDatePreset] = useState<AuditDatePreset>('today');
+  const [dateFrom, setDateFrom] = useState(() => daysFromToday(0));
+  const [dateTo, setDateTo] = useState(() => daysFromToday(0));
+  const applyPreset = (p: AuditDatePreset) => {
+    setDatePreset(p);
+    if (p === 'custom') return;
+    const r = presetRange(p);
+    setDateFrom(r.from);
+    setDateTo(r.to);
+  };
   const [selectedEmployee, setSelectedEmployee] = useState<string>('all');
   const [employees, setEmployees] = useState<AuditEmployee[]>([]);
-  const [monthFilter, setMonthFilter] = useState<string>(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  });
 
   const [violations, setViolations] = useState<AttendanceViolation[]>([]);
   const [outOfRadius, setOutOfRadius] = useState<OutOfRadiusEvent[]>([]);
@@ -238,7 +257,7 @@ export default function AttendanceAudit() {
           }
         }
         // Missing clock-out (clocked in but no clock-out and work_date < today)
-        if (rec.clock_in && !rec.clock_out && rec.work_date < new Date().toISOString().split('T')[0]) {
+        if (rec.clock_in && !rec.clock_out && rec.work_date < ymdLocal(new Date())) {
           vList.push({ ...rec, violation_type: 'missing_clockout', employee: emp });
         }
         // Early departure (clock-out before 4:45 PM)
@@ -287,59 +306,68 @@ export default function AttendanceAudit() {
     }
   }, [dateFrom, dateTo, selectedEmployee, employees, isManagerOrDirector]);
 
+  // Employee summary for the page's date filter. Every employee in the roster gets
+  // a row, so a past working day with no record counts as absent. Same calendar rules
+  // as Attendance Records and Payroll (weekends, company holidays, approved leave).
   const fetchUserMonthlyHours = useCallback(async () => {
     if (!isManagerOrDirector) return;
     setLoadingMonthly(true);
     try {
-      const [year, month] = monthFilter.split('-');
-      const startDate = `${year}-${month}-01`;
-      const endDate = new Date(parseInt(year), parseInt(month), 0).toISOString().split('T')[0];
-
       const empFilter = selectedEmployee !== 'all' ? selectedEmployee : null;
+      const roster = employees.filter((e) => !empFilter || e.id === empFilter);
+      const rosterIds = new Set(roster.map((e) => e.id));
 
-      let query = supabase
+      let attQuery = supabase
         .from('attendance_records')
-        .select('user_id, total_hours, overtime_hours, status')
-        .gte('work_date', startDate)
-        .lte('work_date', endDate);
+        .select('user_id, work_date, clock_in, clock_out, status, total_hours, overtime_hours')
+        .gte('work_date', dateFrom)
+        .lte('work_date', dateTo);
+      if (empFilter) attQuery = attQuery.eq('user_id', empFilter);
 
-      if (empFilter) query = query.eq('user_id', empFilter);
+      const [attRes, holRes, leaveRes] = await Promise.all([
+        attQuery,
+        supabase.from('company_holidays').select('name, holiday_date').gte('holiday_date', dateFrom).lte('holiday_date', dateTo),
+        supabase.from('leave_requests').select('user_id, leave_type, start_date, end_date, status')
+          .in('status', ['approved', 'pending']).lte('start_date', dateTo).gte('end_date', dateFrom),
+      ]);
+      if (attRes.error) throw attRes.error;
 
-      const { data, error } = await query;
-      if (error) throw error;
+      const holidayMap = buildHolidayMap(holRes.data || []);
+      const leaveMap = buildLeaveMap((leaveRes.data || []) as any[], dateFrom, dateTo);
 
-      const empMap = new Map(employees.map((e) => [e.id, e]));
-      const userMap: Record<string, UserMonthlyHoursSummary> = {};
-
-      (data || []).forEach((r: any) => {
-        const emp = empMap.get(r.user_id);
-        if (!userMap[r.user_id]) {
-          userMap[r.user_id] = {
-            user_id: r.user_id,
-            full_name: emp?.full_name || 'Unknown',
-            department: emp?.department || '—',
-            total_hours: 0,
-            overtime_hours: 0,
-            present_days: 0,
-            absent_days: 0,
-            late_days: 0,
-          };
-        }
-        userMap[r.user_id].total_hours += Number(r.total_hours) || 0;
-        userMap[r.user_id].overtime_hours += Number(r.overtime_hours) || 0;
-        if (['present', 'work_from_home', 'half_day'].includes(r.status)) userMap[r.user_id].present_days++;
-        if (r.status === 'absent') userMap[r.user_id].absent_days++;
-        if (r.status === 'late') userMap[r.user_id].late_days++;
+      const byUser: Record<string, any[]> = {};
+      (attRes.data || []).forEach((r: any) => {
+        if (!rosterIds.has(r.user_id)) return;
+        (byUser[r.user_id] ||= []).push(r);
       });
 
-      setUserMonthlyHours(Object.values(userMap).sort((a, b) => b.total_hours - a.total_hours));
+      const rows: UserMonthlyHoursSummary[] = roster.map((e) => {
+        const recs = byUser[e.id] || [];
+        const s = computePeriodStats({ userId: e.id, startDate: dateFrom, endDate: dateTo, records: recs, holidayMap, leaveMap });
+        return {
+          user_id: e.id,
+          full_name: e.full_name || 'Unknown',
+          department: e.department || '—',
+          working_days: s.workingDays,
+          present_days: s.workedDays,
+          absent_days: s.absentDays,
+          late_days: s.lateDays,
+          paid_leave_days: s.paidLeaveDays,
+          unpaid_leave_days: s.unpaidLeaveDays,
+          avg_hours_per_day: s.avgHoursPerWorkedDay,
+          total_hours: recs.reduce((sum, r) => sum + (Number(r.total_hours) || 0) + (Number(r.overtime_hours) || 0), 0),
+          overtime_hours: recs.reduce((sum, r) => sum + (Number(r.overtime_hours) || 0), 0),
+        };
+      });
+
+      setUserMonthlyHours(rows.sort((a, b) => a.full_name.localeCompare(b.full_name)));
     } catch (err) {
-      console.error('Monthly hours fetch error:', err);
-      toast.error('Failed to load monthly hours');
+      console.error('Employee summary fetch error:', err);
+      toast.error('Failed to load employee summary');
     } finally {
       setLoadingMonthly(false);
     }
-  }, [isManagerOrDirector, monthFilter, selectedEmployee, employees]);
+  }, [isManagerOrDirector, dateFrom, dateTo, selectedEmployee, employees]);
 
   useEffect(() => {
     if (employees.length > 0) fetchData();
@@ -394,25 +422,29 @@ export default function AttendanceAudit() {
   };
 
   const exportMonthlyHours = () => {
-    const headers = ['Employee', 'Department', 'Total Hours', 'Overtime Hours', 'Present Days', 'Absent Days', 'Late Days'];
+    const headers = ['Employee', 'Department', 'Working Days', 'Present', 'Absent', 'Late', 'Paid Leave', 'Unpaid Leave', 'Avg Hours/Day', 'Total Hours', 'Overtime Hours'];
     const rows = userMonthlyHours.map((u) => [
       u.full_name,
       u.department,
-      u.total_hours.toFixed(2),
-      u.overtime_hours.toFixed(2),
+      String(u.working_days),
       String(u.present_days),
       String(u.absent_days),
       String(u.late_days),
+      String(u.paid_leave_days),
+      String(u.unpaid_leave_days),
+      u.avg_hours_per_day.toFixed(2),
+      u.total_hours.toFixed(2),
+      u.overtime_hours.toFixed(2),
     ]);
-    downloadCSV(`monthly_hours_${monthFilter}.csv`, headers, rows);
-    toast.success('Monthly hours CSV exported');
+    downloadCSV(`employee_summary_${dateFrom}_to_${dateTo}.csv`, headers, rows);
+    toast.success('Employee summary CSV exported');
   };
 
   const tabs: { id: TabId; label: string; icon: React.ElementType; count: number; color: string }[] = [
+    { id: 'monthly_hours', label: 'Employee Summary',      icon: BarChart2,     count: userMonthlyHours.length, color: 'text-indigo-600' },
     { id: 'violations',    label: 'Attendance Violations', icon: AlertTriangle, count: violations.length,  color: 'text-amber-600' },
     { id: 'out_of_radius', label: 'Out-of-Radius Events',  icon: MapPinOff,     count: outOfRadius.length, color: 'text-rose-600' },
     { id: 'gps_downtime',  label: 'GPS Downtime',          icon: WifiOff,       count: gpsDowntime.length, color: 'text-slate-600' },
-    { id: 'monthly_hours', label: 'Monthly Hours',         icon: BarChart2,     count: userMonthlyHours.length, color: 'text-indigo-600' },
   ];
 
   if (!isManagerOrDirector) return null;
@@ -440,17 +472,29 @@ export default function AttendanceAudit() {
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
               <Calendar size={14} className="text-slate-400" />
+              <select
+                value={datePreset}
+                onChange={(e) => applyPreset(e.target.value as AuditDatePreset)}
+                className="text-sm text-slate-700 bg-transparent outline-none pr-2"
+                aria-label="Period"
+              >
+                <option value="today">Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="last7">Last 7 days</option>
+                <option value="thisMonth">This month</option>
+                <option value="custom">Custom</option>
+              </select>
               <input
                 type="date"
                 value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
+                onChange={(e) => { setDatePreset('custom'); setDateFrom(e.target.value); }}
                 className="text-sm text-slate-700 bg-transparent outline-none"
               />
               <span className="text-slate-400 text-xs">to</span>
               <input
                 type="date"
                 value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
+                onChange={(e) => { setDatePreset('custom'); setDateTo(e.target.value); }}
                 className="text-sm text-slate-700 bg-transparent outline-none"
               />
             </div>
@@ -711,20 +755,44 @@ export default function AttendanceAudit() {
           )}
 
           {/* Monthly Hours Tab */}
+          {activeTab === 'monthly_hours' && userMonthlyHours.length > 0 && (() => {
+            const tPresent = userMonthlyHours.reduce((s, u) => s + u.present_days, 0);
+            const tWorking = userMonthlyHours.reduce((s, u) => s + u.working_days, 0);
+            const tAbsent = userMonthlyHours.reduce((s, u) => s + u.absent_days, 0);
+            const tLate = userMonthlyHours.reduce((s, u) => s + u.late_days, 0);
+            const tOt = userMonthlyHours.reduce((s, u) => s + u.overtime_hours, 0);
+            const avgHrs = tPresent > 0 ? userMonthlyHours.reduce((s, u) => s + u.avg_hours_per_day * u.present_days, 0) / tPresent : 0;
+            const rate = tWorking > 0 ? Math.round((tPresent / tWorking) * 100) : 0;
+            const cards = [
+              { label: 'Employees', value: String(userMonthlyHours.length), color: 'text-slate-800' },
+              { label: 'Present days', value: String(tPresent), color: 'text-emerald-700' },
+              { label: 'Attendance rate', value: `${rate}%`, color: 'text-emerald-700' },
+              { label: 'Absent days', value: String(tAbsent), color: 'text-red-600' },
+              { label: 'Late days', value: String(tLate), color: 'text-amber-600' },
+              { label: 'Avg hours / day', value: `${avgHrs.toFixed(1)}h`, color: 'text-indigo-700' },
+              { label: 'Overtime', value: `${tOt.toFixed(1)}h`, color: 'text-orange-600' },
+            ];
+            return (
+              <div className="grid grid-cols-2 lg:grid-cols-7 gap-3 mb-4">
+                {cards.map((c) => (
+                  <div key={c.label} className="bg-white rounded-xl border border-slate-200 px-4 py-3">
+                    <p className="text-[11px] uppercase tracking-wide text-slate-400">{c.label}</p>
+                    <p className={`text-xl font-bold mt-1 ${c.color}`}>{c.value}</p>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           {activeTab === 'monthly_hours' && (
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">
                   <BarChart2 size={16} className="text-indigo-500" />
-                  <h2 className="font-semibold text-slate-800 text-sm">Monthly Attendance Hours per Employee</h2>
+                  <h2 className="font-semibold text-slate-800 text-sm">Employee Summary</h2>
                 </div>
                 <div className="flex items-center gap-2">
-                  <input
-                    type="month"
-                    value={monthFilter}
-                    onChange={(e) => setMonthFilter(e.target.value)}
-                    className="text-sm border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+                  <span className="text-xs text-slate-500">{dateFrom} to {dateTo} · change the period above</span>
                   <button
                     onClick={fetchUserMonthlyHours}
                     disabled={loadingMonthly}
@@ -748,7 +816,7 @@ export default function AttendanceAudit() {
               ) : userMonthlyHours.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-slate-400">
                   <BarChart2 size={32} className="mb-2 opacity-30" />
-                  <p className="text-sm">No attendance data for this month</p>
+                  <p className="text-sm">No employees to show</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -757,11 +825,14 @@ export default function AttendanceAudit() {
                       <tr className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
                         <th className="text-left px-5 py-3 font-medium">Employee</th>
                         <th className="text-left px-4 py-3 font-medium">Department</th>
-                        <th className="text-right px-4 py-3 font-medium">Total Hours</th>
-                        <th className="text-right px-4 py-3 font-medium">Overtime</th>
+                        <th className="text-right px-4 py-3 font-medium">Working Days</th>
                         <th className="text-right px-4 py-3 font-medium">Present</th>
                         <th className="text-right px-4 py-3 font-medium">Absent</th>
                         <th className="text-right px-4 py-3 font-medium">Late</th>
+                        <th className="text-right px-4 py-3 font-medium">Leave</th>
+                        <th className="text-right px-4 py-3 font-medium">Avg Hrs/Day</th>
+                        <th className="text-right px-4 py-3 font-medium">Total Hours</th>
+                        <th className="text-right px-4 py-3 font-medium">Overtime</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -776,45 +847,39 @@ export default function AttendanceAudit() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-slate-500 text-xs">{u.department}</td>
-                          <td className="px-4 py-3 text-right">
-                            <span className="font-bold text-indigo-700">{u.total_hours.toFixed(1)}h</span>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <span className={`font-semibold ${u.overtime_hours > 0 ? 'text-orange-600' : 'text-slate-400'}`}>
-                              {u.overtime_hours.toFixed(1)}h
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <span className="font-semibold text-emerald-600">{u.present_days}</span>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <span className={`font-semibold ${u.absent_days > 0 ? 'text-red-600' : 'text-slate-400'}`}>{u.absent_days}</span>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <span className={`font-semibold ${u.late_days > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{u.late_days}</span>
-                          </td>
+                          <td className="px-4 py-3 text-right text-slate-700">{u.working_days}</td>
+                          <td className="px-4 py-3 text-right"><span className="font-semibold text-emerald-600">{u.present_days}</span></td>
+                          <td className="px-4 py-3 text-right"><span className={`font-semibold ${u.absent_days > 0 ? 'text-red-600' : 'text-slate-400'}`}>{u.absent_days}</span></td>
+                          <td className="px-4 py-3 text-right"><span className={`font-semibold ${u.late_days > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{u.late_days}</span></td>
+                          <td className="px-4 py-3 text-right text-xs text-slate-500">{u.paid_leave_days + u.unpaid_leave_days > 0 ? `${u.paid_leave_days} paid · ${u.unpaid_leave_days} unpaid` : '—'}</td>
+                          <td className="px-4 py-3 text-right"><span className="font-semibold text-indigo-700">{u.present_days > 0 ? `${u.avg_hours_per_day.toFixed(1)}h` : '—'}</span></td>
+                          <td className="px-4 py-3 text-right"><span className="font-bold text-indigo-700">{u.total_hours.toFixed(1)}h</span></td>
+                          <td className="px-4 py-3 text-right"><span className={`font-semibold ${u.overtime_hours > 0 ? 'text-orange-600' : 'text-slate-400'}`}>{u.overtime_hours.toFixed(1)}h</span></td>
                         </tr>
                       ))}
                     </tbody>
                     <tfoot className="bg-slate-50 border-t border-slate-200">
-                      <tr>
-                        <td colSpan={2} className="px-5 py-3 text-xs font-bold text-slate-600">TOTAL ({userMonthlyHours.length} employees)</td>
-                        <td className="px-4 py-3 text-right font-bold text-indigo-700">
-                          {userMonthlyHours.reduce((s, u) => s + u.total_hours, 0).toFixed(1)}h
-                        </td>
-                        <td className="px-4 py-3 text-right font-bold text-orange-600">
-                          {userMonthlyHours.reduce((s, u) => s + u.overtime_hours, 0).toFixed(1)}h
-                        </td>
-                        <td className="px-4 py-3 text-right font-bold text-emerald-600">
-                          {userMonthlyHours.reduce((s, u) => s + u.present_days, 0)}
-                        </td>
-                        <td className="px-4 py-3 text-right font-bold text-red-600">
-                          {userMonthlyHours.reduce((s, u) => s + u.absent_days, 0)}
-                        </td>
-                        <td className="px-4 py-3 text-right font-bold text-amber-600">
-                          {userMonthlyHours.reduce((s, u) => s + u.late_days, 0)}
-                        </td>
-                      </tr>
+                      {(() => {
+                        const sum = (f: (u: UserMonthlyHoursSummary) => number) => userMonthlyHours.reduce((s, u) => s + f(u), 0);
+                        const tPresent = sum((u) => u.present_days);
+                        const avgTotal = tPresent > 0 ? sum((u) => u.avg_hours_per_day * u.present_days) / tPresent : null;
+                        const cell = 'px-4 py-3 text-right font-bold';
+                        return (
+                          <tr>
+                            <td colSpan={2} className="px-5 py-3 text-xs font-bold text-slate-600">TOTAL ({userMonthlyHours.length} employees)</td>
+                            <td className={`${cell} text-slate-700`}>{sum((u) => u.working_days)}</td>
+                            <td className={`${cell} text-emerald-600`}>{tPresent}</td>
+                            <td className={`${cell} text-red-600`}>{sum((u) => u.absent_days)}</td>
+                            <td className={`${cell} text-amber-600`}>{sum((u) => u.late_days)}</td>
+                            <td className="px-4 py-3 text-right text-xs font-semibold text-slate-600">
+                              {sum((u) => u.paid_leave_days)} paid · {sum((u) => u.unpaid_leave_days)} unpaid
+                            </td>
+                            <td className={`${cell} text-indigo-700`}>{avgTotal !== null ? `${avgTotal.toFixed(1)}h` : '—'}</td>
+                            <td className={`${cell} text-indigo-700`}>{sum((u) => u.total_hours).toFixed(1)}h</td>
+                            <td className={`${cell} text-orange-600`}>{sum((u) => u.overtime_hours).toFixed(1)}h</td>
+                          </tr>
+                        );
+                      })()}
                     </tfoot>
                   </table>
                 </div>

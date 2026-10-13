@@ -30,7 +30,7 @@ export default function AnalyticsKPIGrid() {
   });
   const [loading, setLoading] = useState(true);
 
-  const { start, end, deptUserIds, refreshKey } = useAnalyticsFilter();
+  const { start, end, rangeLabel, deptUserIds, refreshKey } = useAnalyticsFilter();
   const deptKey = deptUserIds ? [...deptUserIds].sort().join(',') : 'all';
 
   useEffect(() => {
@@ -85,7 +85,7 @@ export default function AnalyticsKPIGrid() {
         ? Math.round((doneTasks / allTasks.length) * 100)
         : null;
 
-      // Turnover risk: employees with <50% attendance this month
+      // Turnover risk: employees with <50% attendance in the selected range
       const userAttendanceMap: Record<string, { total: number; present: number }> = {};
       workingRecords.forEach((r) => {
         if (!userAttendanceMap[r.user_id]) userAttendanceMap[r.user_id] = { total: 0, present: 0 };
@@ -126,7 +126,7 @@ export default function AnalyticsKPIGrid() {
       id: 'akpi-attendance',
       label: t('avgAttendanceRate'),
       value: kpi.avgAttendanceRate !== null ? `${kpi.avgAttendanceRate}%` : '—',
-      sub: t('last30Days'),
+      sub: rangeLabel,
       icon: Clock,
       trend: kpi.avgAttendanceRate !== null ? (kpi.avgAttendanceRate >= 85 ? 'up' : 'down') : 'neutral',
       colorClass: 'text-slate-700 dark:text-slate-300',
@@ -170,7 +170,7 @@ export default function AnalyticsKPIGrid() {
       id: 'akpi-overtime-cost',
       label: t('overTimeCost'),
       value: kpi.overtimeCost !== null ? `₹${kpi.overtimeCost.toLocaleString()}` : '—',
-      sub: t('currentMonth'),
+      sub: rangeLabel,
       icon: Wallet,
       trend: 'neutral' as const,
       colorClass: 'text-slate-700 dark:text-slate-300',
@@ -181,7 +181,7 @@ export default function AnalyticsKPIGrid() {
       id: 'akpi-task-completion',
       label: t('taskCompletionRate'),
       value: kpi.taskCompletionRate !== null ? `${kpi.taskCompletionRate}%` : '—',
-      sub: t('thisWeek'),
+      sub: rangeLabel,
       icon: CheckSquare,
       trend: kpi.taskCompletionRate !== null ? (kpi.taskCompletionRate >= 70 ? 'up' : 'down') : 'neutral',
       colorClass: 'text-slate-700 dark:text-slate-300',

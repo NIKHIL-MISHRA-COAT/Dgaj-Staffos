@@ -73,7 +73,7 @@ export default function RedFlagPanel() {
 
       const flags: RedFlag[] = [];
 
-      // Attendance flags: employees with <70% attendance this month
+      // Attendance flags: employees with <70% attendance in the selected range
       const userAttMap: Record<string, { total: number; present: number; absent: number }> = {};
       attendance.forEach((r) => {
         if (['weekend', 'holiday'].includes(r.status)) return;
