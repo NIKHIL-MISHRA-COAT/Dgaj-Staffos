@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import AppLogo from '@/components/ui/AppLogo';
-import { LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare, BarChart3, Settings, ChevronLeft, ChevronRight, ChevronDown, Wallet, BookOpen, Crown, X, UserCircle, UserCog, Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command, Navigation, ClipboardList, Building2, SlidersHorizontal, AlertTriangle, ScrollText, BookMarked, CheckSquare, ListTodo, Repeat, PieChart, TrendingUp, LogOut } from 'lucide-react';
+import { LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare, BarChart3, Fuel, Settings, ChevronLeft, ChevronRight, ChevronDown, Wallet, BookOpen, Crown, X, UserCircle, UserCog, Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command, Navigation, ClipboardList, Building2, SlidersHorizontal, AlertTriangle, ScrollText, BookMarked, CheckSquare, ListTodo, Repeat, PieChart, TrendingUp, LogOut } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useRouter } from 'next/navigation';
@@ -45,16 +45,18 @@ const navItems: NavItem[] = [
   { id: 'nav-discrepancy', label: 'Client Discrepancies', icon: AlertTriangle, href: '/client-discrepancy-reports', group: 'collaborate' },
 
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
-  { id: 'nav-audit-log', label: 'Audit Log', icon: ScrollText, href: '/audit-log', group: 'resources' },
-  { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'resources', managerOnly: true },
+  { id: 'nav-daily-report', label: 'Daily Report', icon: Fuel, href: '/daily-report', group: 'resources' },
   { id: 'nav-user-mgmt', label: 'User Management', icon: UserCog, href: '/user-management', group: 'resources', managerOnly: true },
   { id: 'nav-app-settings', label: 'App Settings', icon: SlidersHorizontal, href: '/app-settings', group: 'resources' },
 
   { id: 'nav-command-hub', label: 'Command Hub', icon: Command, href: '/director-command-hub', group: 'director_only' },
   { id: 'nav-director', label: 'Director Panel', icon: Crown, href: '/director-control-panel', group: 'director_only' },
   { id: 'nav-firm-config', label: 'Firm Configuration', icon: Building2, href: '/firm-configuration', group: 'director_only' },
-  { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'director_only' },
   { id: 'nav-firm-reports', label: 'Firm Reports', icon: TrendingUp, href: '/firm-reports', group: 'director_only' },
+  { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'director_only' },
+  
+  { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'director_only' },
+  { id: 'nav-audit-log', label: 'Audit Log', icon: ScrollText, href: '/audit-log', group: 'director_only' },
   { id: 'nav-live-map', label: 'Live Locations', icon: Navigation, href: '/live-location-map', group: 'director_only' },
   { id: 'nav-settings', label: 'Director Settings', icon: Shield, href: '/director-settings', group: 'director_only' },
 ];
@@ -102,6 +104,20 @@ export default function Sidebar({ activePath, onClose }: SidebarProps) {
         if (data) setProfile(data);
       });
   }, [user?.id, pinSession?.userId]);
+
+  // Daily Report menu: directors always; others only if assigned as an editor of at least one firm
+  const [dailyReportAccess, setDailyReportAccess] = useState(false);
+  useEffect(() => {
+    const uid = user?.id || pinSession?.userId;
+    if (!uid) return;
+    if (pinSession?.role === 'director') { setDailyReportAccess(true); return; }
+    const supabase = createClient();
+    supabase
+      .from('daily_report_editors')
+      .select('firm_id', { count: 'exact', head: true })
+      .eq('user_id', uid)
+      .then(({ count }) => setDailyReportAccess((count ?? 0) > 0));
+  }, [user?.id, pinSession?.userId, pinSession?.role]);
 
   const role = pinSession?.role || '';
   const isManagerOrDirector = role === 'director' || role === 'manager' || role === 'executive';
@@ -183,6 +199,7 @@ export default function Sidebar({ activePath, onClose }: SidebarProps) {
           const items = navItems.filter((n) => {
             if (n.group !== group.id) return false;
             if (group.id === 'director_only') return isDirectorOnly;
+            if (n.id === 'nav-daily-report') return dailyReportAccess;
             if (n.managerOnly) return isManagerOrDirector;
             return true;
           });

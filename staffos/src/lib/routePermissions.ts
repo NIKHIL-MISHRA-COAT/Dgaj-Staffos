@@ -15,10 +15,12 @@ export const DIRECTOR_ONLY_ROUTES = [
   '/director-settings',
   '/live-location-map',
   '/firm-reports',
+  '/reports',
+  '/analytics-reporting-dashboard',
+  '/audit-log',
 ];
 
 export const MANAGER_PLUS_ROUTES = [
-  '/analytics-reporting-dashboard',
   '/user-management',
   '/attendance-audit',
   '/leave-admin',

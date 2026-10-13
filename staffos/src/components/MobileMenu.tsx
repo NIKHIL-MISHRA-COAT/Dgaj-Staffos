@@ -5,7 +5,7 @@ import Link from 'next/link';
 import AppLogo from '@/components/ui/AppLogo';
 import {
   LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare,
-  BarChart3, Settings, Wallet, BookOpen, Crown, X, UserCircle, UserCog,
+  BarChart3, Fuel, Settings, Wallet, BookOpen, Crown, X, UserCircle, UserCog,
   Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command,
   Navigation, ClipboardList, Building2, SlidersHorizontal,
   AlertTriangle, ScrollText, BookMarked, LogOut, ChevronRight,
@@ -45,6 +45,7 @@ const navItems: NavItem[] = [
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
   { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'management' },
   { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'management' },
+  { id: 'nav-daily-report', label: 'Daily Report', icon: Fuel, href: '/daily-report', group: 'management' },
   { id: 'nav-user-mgmt', label: 'User Management', icon: UserCog, href: '/user-management', group: 'management' },
   { id: 'nav-live-map', label: 'Live Locations', icon: Navigation, href: '/live-location-map', group: 'management' },
   { id: 'nav-audit', label: 'Attendance Audit', icon: ClipboardList, href: '/attendance-audit', group: 'management' },
@@ -96,6 +97,20 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
         if (data) setProfile(data);
       });
   }, [user?.id, pinSession?.userId]);
+
+  // Daily Report menu: directors always; others only if assigned as an editor of at least one firm
+  const [dailyReportAccess, setDailyReportAccess] = useState(false);
+  useEffect(() => {
+    const uid = user?.id || pinSession?.userId;
+    if (!uid) return;
+    if (pinSession?.role === 'director') { setDailyReportAccess(true); return; }
+    const supabase = createClient();
+    supabase
+      .from('daily_report_editors')
+      .select('firm_id', { count: 'exact', head: true })
+      .eq('user_id', uid)
+      .then(({ count }) => setDailyReportAccess((count ?? 0) > 0));
+  }, [user?.id, pinSession?.userId, pinSession?.role]);
 
   const role = pinSession?.role || '';
   const isManagerOrDirector = role === 'director' || role === 'manager' || role === 'executive';
@@ -172,6 +187,8 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
   const filteredNavItems = navItems.filter((item) => {
     const mgmtOnly = ['nav-live-map', 'nav-audit', 'nav-leave-admin', 'nav-holidays'];
     if (mgmtOnly.includes(item.id)) return isManagerOrDirector;
+    if (item.id === 'nav-daily-report') return dailyReportAccess;
+    if (['nav-analytics', 'nav-reports', 'nav-audit-log'].includes(item.id)) return role === 'director';
     return true;
   });
 

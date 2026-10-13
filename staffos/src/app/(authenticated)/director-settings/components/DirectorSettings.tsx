@@ -7,6 +7,7 @@ import { Settings, Shield, Calendar, Clock, Briefcase, ChevronDown, ChevronUp, S
 import { toast } from 'sonner';
 import { Toaster } from 'sonner';
 import { rolloverLeave, getFiscalYear } from '@/lib/leaveRollover';
+import DailyReportAccessSettings from './DailyReportAccessSettings';
 
 interface LeaveQuota {
   role: string;
@@ -90,7 +91,7 @@ const defaultFinancialYear: FinancialYearConfig = {
   current_fy_end: '2027-03-31',
 };
 
-const sectionIds = ['leave', 'leave_rollover', 'financial_year', 'working_hours', 'holidays', 'tasks', 'overtime', 'shifts'] as const;
+const sectionIds = ['leave', 'leave_rollover', 'financial_year', 'working_hours', 'holidays', 'tasks', 'overtime', 'shifts', 'daily_report'] as const;
 
 const ROLLOVER_REMINDER_TITLE = '⚠️ Year-end leave rollover — open Director Settings and click Start leave rollover';
 type SectionId = typeof sectionIds[number];
@@ -302,6 +303,7 @@ export default function DirectorSettings() {
     { id: 'tasks',          label: 'Task Limits',              icon: Briefcase,desc: 'Concurrent & daily task caps' },
     { id: 'overtime',       label: 'Overtime Thresholds',      icon: Clock,    desc: 'Daily, weekly & monthly limits' },
     { id: 'shifts',         label: 'Shift Defaults',           icon: Clock,    desc: 'Working hours per shift type' },
+    { id: 'daily_report',   label: 'Fuel Station Daily Report', icon: Briefcase, desc: 'Choose firms in the daily report and assign their editors' },
   ];
 
   if (loadingSettings) {
@@ -353,6 +355,7 @@ export default function DirectorSettings() {
 
               {isOpen && (
                 <div className="border-t border-slate-100 px-5 py-5">
+                  {sec.id === 'daily_report' && <DailyReportAccessSettings />}
                   {/* Leave Quotas */}
                   {sec.id === 'leave' && (
                     <div>
