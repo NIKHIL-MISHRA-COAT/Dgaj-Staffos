@@ -75,7 +75,8 @@ interface UserMonthlyHoursSummary {
 
 type TabId = 'violations' | 'out_of_radius' | 'gps_downtime' | 'monthly_hours';
 
-const WORK_START_HOUR = 9; // 9:00 AM
+const DEFAULT_WORK_START = '09:00'; // fallback when Firm Configuration has no start time
+const LATE_GRACE_MINUTES = 15;      // clock-in within this many minutes after start is not late
 const WORK_END_HOUR = 17;  // 5:00 PM
 
 function formatDate(d: string) {
@@ -194,6 +195,15 @@ export default function AttendanceAudit() {
       // from seeing another firm's attendance violations.
       const visibleUserIds = employees.map((e) => e.id);
 
+      // Office start time comes from Firm Configuration → Working Hours
+      const { data: whRow } = await supabase
+        .from('director_settings')
+        .select('setting_value')
+        .eq('setting_key', 'working_hours')
+        .maybeSingle();
+      const [startH, startM] = String(whRow?.setting_value?.standard_start || DEFAULT_WORK_START)
+        .split(':').map((n) => Number(n) || 0);
+
       // 1. Attendance violations — late, absent, missing clock-out
       let attQuery = supabase
         .from('attendance_records')
@@ -247,11 +257,11 @@ export default function AttendanceAudit() {
           vList.push({ ...rec, violation_type: 'absent', employee: emp });
           return;
         }
-        // Late arrival (clock-in after 9:15 AM)
+        // Late arrival: clock-in after (office start time + grace minutes)
         if (rec.clock_in) {
           const ci = new Date(rec.clock_in);
           const lateThreshold = new Date(ci);
-          lateThreshold.setHours(WORK_START_HOUR, 15, 0, 0);
+          lateThreshold.setHours(startH, startM + LATE_GRACE_MINUTES, 0, 0);
           if (ci > lateThreshold) {
             vList.push({ ...rec, violation_type: 'late_arrival', employee: emp });
           }
