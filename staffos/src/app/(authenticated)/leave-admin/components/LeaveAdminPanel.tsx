@@ -7,6 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import FirmFilterTabs from '@/components/FirmFilterTabs';
 import { toast, Toaster } from 'sonner';
 import Icon from '@/components/ui/AppIcon';
+import { fetchSavedQuotas, quotaForRole, type QuotaType } from '@/lib/leaveQuotas';
 
 
 interface LeaveBalance {
@@ -37,10 +38,10 @@ interface FirmOption { id: string; name: string; code: string; }
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 const LEAVE_TYPES = [
-  { key: 'substitute', label: 'Substitute Leave', defaultDays: 12 },
-  { key: 'paid', label: 'Paid Leave', defaultDays: 15 },
-  { key: 'medical', label: 'Medical Leave', defaultDays: 8 },
-  { key: 'half_day', label: 'Half Day', defaultDays: 10 },
+  { key: 'substitute', label: 'Substitute Leave', defaultDays: 0 },
+  { key: 'paid', label: 'Paid Leave', defaultDays: 0 },
+  { key: 'medical', label: 'Medical Leave', defaultDays: 0 },
+  { key: 'half_day', label: 'Half Day', defaultDays: 0 },
   { key: 'unpaid', label: 'Unpaid Leave', defaultDays: 0 },
 ];
 
@@ -131,19 +132,10 @@ export default function LeaveAdminPanel() {
           settingsMap[row.setting_key] = row.setting_value;
         });
 
-        // Load leave quotas from leave_quotas_by_fy key
-        const fy = settingsMap['leave_quotas_by_fy'];
-        if (fy) {
-          const fyKey = `${selectedFY}-${selectedFY + 1}`;
-          const quotas = fy[fyKey] || fy[String(selectedFY)];
-          if (quotas) {
-            const newEnt: Record<string, number> = { ...entitlements };
-            LEAVE_TYPES.forEach(lt => {
-              if (quotas[lt.key] !== undefined) newEnt[lt.key] = quotas[lt.key];
-            });
-            setEntitlements(newEnt);
-          }
-        }
+        // Quotas are stored per role in leave_quotas_by_fy (same source as Director Settings).
+        // This panel edits the Employee row; other roles are kept as saved.
+        const quotas = quotaForRole(settingsMap['leave_quotas_by_fy'] ?? {}, 'employee');
+        setEntitlements(Object.fromEntries(LEAVE_TYPES.map(lt => [lt.key, Number(quotas[lt.key as QuotaType]) || 0])));
 
         // Load carry forward settings from carry_forward_settings key
         const cf = settingsMap['carry_forward_settings'];
@@ -165,12 +157,11 @@ export default function LeaveAdminPanel() {
   const handleSaveEntitlements = async () => {
     setSaving(true);
     try {
-      const fyKey = `${selectedFY}-${selectedFY + 1}`;
-
-      // Save leave quotas using key-value upsert pattern
+      // Save into the per-role map, keeping the other roles exactly as they are
+      const saved = await fetchSavedQuotas(supabase);
       const { error: quotaError } = await supabase.from('director_settings')
         .upsert(
-          { setting_key: 'leave_quotas_by_fy', setting_value: { [fyKey]: entitlements } },
+          { setting_key: 'leave_quotas_by_fy', setting_value: { ...saved, employee: { ...(saved.employee ?? {}), ...entitlements } } },
           { onConflict: 'setting_key' }
         );
       if (quotaError) throw quotaError;

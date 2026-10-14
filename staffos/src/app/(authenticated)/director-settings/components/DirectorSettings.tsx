@@ -65,10 +65,10 @@ interface FinancialYearConfig {
 }
 
 const defaultLeaveQuotas: LeaveQuota[] = [
-  { role: 'Employee',  substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
-  { role: 'Manager',   substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
-  { role: 'Executive', substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
-  { role: 'Director',  substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
+  { role: 'Employee',  substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
+  { role: 'Manager',   substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
+  { role: 'Executive', substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
+  { role: 'Director',  substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
 ];
 
 const defaultHolidays: Holiday[] = [];
@@ -253,6 +253,25 @@ export default function DirectorSettings() {
         const quotaMap: Record<string, object> = {};
         leaveQuotas.forEach((q) => { quotaMap[q.role.toLowerCase()] = { substitute: q.substitute, paid: q.paid, unpaid: q.unpaid, medical: q.medical, half_day: q.half_day }; });
         await saveSetting('leave_quotas_by_fy', quotaMap);
+
+        // Sync leave balances for all users (same as Firm Configuration)
+        const nowFY = new Date();
+        const fiscalYear = nowFY.getMonth() >= 3 ? nowFY.getFullYear() : nowFY.getFullYear() - 1;
+        const { data: allUsers } = await supabase.from('user_profiles').select('id, role');
+        const leaveTypes: Array<keyof Omit<LeaveQuota, 'role'>> = ['substitute', 'paid', 'unpaid', 'medical', 'half_day'];
+        const balanceRows = (allUsers || []).flatMap((u: { id: string; role: string }) => {
+          const roleKey = u.role?.toLowerCase() || 'employee';
+          const quota = leaveQuotas.find((q) => q.role.toLowerCase() === roleKey)
+            || leaveQuotas.find((q) => q.role.toLowerCase() === 'employee')
+            || leaveQuotas[0];
+          return leaveTypes.map((lt) => ({ user_id: u.id, leave_type: lt, total_days: quota[lt], fiscal_year: fiscalYear }));
+        });
+        for (let i = 0; i < balanceRows.length; i += 50) {
+          const { error: syncErr } = await supabase
+            .from('leave_balances')
+            .upsert(balanceRows.slice(i, i + 50), { onConflict: 'user_id,leave_type,fiscal_year', ignoreDuplicates: false });
+          if (syncErr) console.warn('Leave balance sync warning:', syncErr.message);
+        }
       } else if (section === 'tasks') {
         await saveSetting('task_limits', taskLimits);
       } else if (section === 'overtime') {

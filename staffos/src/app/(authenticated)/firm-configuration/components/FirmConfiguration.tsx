@@ -60,10 +60,10 @@ interface FinancialYearConfig {
 }
 
 const emptyLeaveQuotas: LeaveQuota[] = [
-  { role: 'Employee',  substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
-  { role: 'Manager',   substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
-  { role: 'Executive', substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
-  { role: 'Director',  substitute: 12, paid: 15, unpaid: 0, medical: 8, half_day: 10 },
+  { role: 'Employee',  substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
+  { role: 'Manager',   substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
+  { role: 'Executive', substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
+  { role: 'Director',  substitute: 0, paid: 0, unpaid: 0, medical: 0, half_day: 0 },
 ];
 
 const defaultWorkingHours: WorkingHoursConfig = {

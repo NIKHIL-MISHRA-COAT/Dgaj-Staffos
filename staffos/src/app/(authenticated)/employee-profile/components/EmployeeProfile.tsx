@@ -173,17 +173,9 @@ export default function EmployeeProfile() {
         .gte('start_date', fyStart)
         .lte('start_date', fyEnd);
 
-      // Get leave quotas from director_settings
-      const { data: settingsData } = await supabase
-        .from('director_settings')
-        .select('setting_value')
-        .eq('setting_key', 'leave_quotas_by_fy')
-        .single();
-
+      // Leave quotas for this role, from Director Settings (the same values synced into leave_balances)
       const role = profileData?.role || 'employee';
-      const quotas = settingsData?.setting_value?.[role] || {
-        casual: 12, sick: 8, paid: 15, comp_off: 2, work_from_home: 8,
-      };
+      const quotas = quotaForRole(await fetchSavedQuotas(supabase), role);
 
       const balances: LeaveBalance[] = Object.entries(quotas).map(([type, total]) => {
         const approved = (leaveRequests || [])

@@ -1,5 +1,7 @@
 'use client';
 
+import { fetchSavedQuotas, quotaForRole, quotaValue } from '@/lib/leaveQuotas';
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
@@ -47,10 +49,10 @@ interface ApplyForm {
 }
 
 const leaveTypeConfig: Record<LeaveType, { label: string; color: string; bg: string; bar: string; quota: number; requiresCertificate: boolean; description: string }> = {
-  substitute:  { label: 'Substitute Leave', color: 'text-blue-700',    bg: 'bg-blue-50',    bar: 'bg-blue-500',   quota: 12, requiresCertificate: false, description: 'Substitute / compensatory leave — must be applied for' },
-  paid:        { label: 'Paid Leave',        color: 'text-emerald-700', bg: 'bg-emerald-50', bar: 'bg-emerald-500',quota: 5,  requiresCertificate: false, description: '5 paid leaves per financial year — must be applied for' },
-  medical:     { label: 'Medical Leave',     color: 'text-red-700',     bg: 'bg-red-50',     bar: 'bg-red-400',    quota: 8,  requiresCertificate: true,  description: 'Medical leave — doctor certificate required — must be applied for' },
-  half_day:    { label: 'Half Day Leave',    color: 'text-amber-700',   bg: 'bg-amber-50',   bar: 'bg-amber-400',  quota: 10, requiresCertificate: false, description: 'Half day leave — deducts 0.5 day from balance' },
+  substitute:  { label: 'Substitute Leave', color: 'text-blue-700',    bg: 'bg-blue-50',    bar: 'bg-blue-500',   quota: 0, requiresCertificate: false, description: 'Substitute / compensatory leave — must be applied for' },
+  paid:        { label: 'Paid Leave',        color: 'text-emerald-700', bg: 'bg-emerald-50', bar: 'bg-emerald-500',quota: 0,  requiresCertificate: false, description: 'Paid leave per the quota set in Director Settings — must be applied for' },
+  medical:     { label: 'Medical Leave',     color: 'text-red-700',     bg: 'bg-red-50',     bar: 'bg-red-400',    quota: 0,  requiresCertificate: true,  description: 'Medical leave — doctor certificate required — must be applied for' },
+  half_day:    { label: 'Half Day Leave',    color: 'text-amber-700',   bg: 'bg-amber-50',   bar: 'bg-amber-400',  quota: 0, requiresCertificate: false, description: 'Half day leave — deducts 0.5 day from balance' },
   comp_off:    { label: 'Comp-Off',          color: 'text-purple-700',  bg: 'bg-purple-50',  bar: 'bg-purple-500', quota: 0,  requiresCertificate: false, description: 'Compensatory off for working on holidays/weekends' },
 };
 
@@ -131,29 +133,11 @@ export default function LeaveManagement() {
     const fy = getFiscalYear();
     setCurrentFY(fy);
 
-    const { data: settingsData } = await supabase
-      .from('director_settings')
-      .select('setting_value')
-      .eq('setting_key', 'leave_quotas_by_fy')
-      .single();
-
-    const fyKey = `${fy}-${fy + 1}`;
-    const adminQuotas = settingsData?.setting_value?.[fyKey] || settingsData?.setting_value?.[String(fy)];
-
-    // Determine user role for quota lookup
+    // Quota for this user's role, from Director Settings (the same values synced into leave_balances)
     const userRole = profile?.role || pinSession?.role || 'employee';
-    const roleKey = userRole.toLowerCase();
+    const roleQuota = quotaForRole(await fetchSavedQuotas(supabase), userRole);
 
-    const resolvedQuota = (lt: LeaveType): number => {
-      // First try role-specific quota from firm config
-      if (adminQuotas) {
-        const roleQuota = adminQuotas[roleKey] || adminQuotas['employee'];
-        if (roleQuota && roleQuota[lt] !== undefined) return roleQuota[lt];
-        // Fallback: try flat quota (old format)
-        if (adminQuotas[lt] !== undefined) return adminQuotas[lt];
-      }
-      return leaveTypeConfig[lt].quota;
-    };
+    const resolvedQuota = (lt: LeaveType): number => quotaValue(roleQuota, lt);
 
     const { data } = await supabase
       .from('leave_balances')
@@ -247,7 +231,7 @@ export default function LeaveManagement() {
   const getBalance = (lt: LeaveType) => {
     const b = balances.find((x) => x.leave_type === lt);
     const cfg = leaveTypeConfig[lt];
-    return { total: b?.total_days ?? cfg.quota, used: b?.used_days ?? 0 };
+    return { total: b?.total_days ?? 0, used: b?.used_days ?? 0 };
   };
 
   const uploadCertificate = async (file: File): Promise<{ path: string; url: string } | null> => {

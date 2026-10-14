@@ -95,20 +95,9 @@ export default function LeaveRequestForm() {
     try {
       const fy = getFiscalYear();
 
-      // Always fetch admin-configured entitlements first
-      const { data: settingsData } = await supabase
-        .from('director_settings')
-        .select('setting_value')
-        .eq('setting_key', 'leave_quotas_by_fy')
-        .single();
-
-      const fyKey = `${fy}-${fy + 1}`;
-      const adminQuotas = settingsData?.setting_value?.[fyKey] || settingsData?.setting_value?.[String(fy)];
-
-      const resolvedQuota = (lt: LeaveType): number => {
-        if (adminQuotas && adminQuotas[lt] !== undefined) return adminQuotas[lt];
-        return leaveTypeConfig[lt].quota;
-      };
+      // Entitlements come from Director Settings (per role), synced into leave_balances
+      const { data: profile } = await supabase.from('user_profiles').select('role').eq('id', user.id).maybeSingle();
+      const quota = quotaForRole(await fetchSavedQuotas(supabase), profile?.role);
 
       const { data } = await supabase
         .from('leave_balances')
@@ -116,24 +105,22 @@ export default function LeaveRequestForm() {
         .eq('user_id', user.id)
         .eq('fiscal_year', fy);
 
-      // Upsert with admin-configured total_days so entitlement changes are reflected
+      // Create only the rows that are missing; existing totals are kept as synced
       const leaveTypes: LeaveType[] = ['substitute', 'paid', 'medical'];
-      const upsertRows = leaveTypes.map(lt => {
-        const existing = (data || []).find((b: any) => b.leave_type === lt);
-        return {
-          user_id: user.id,
-          leave_type: lt,
-          fiscal_year: fy,
-          total_days: resolvedQuota(lt),
-          used_days: existing?.used_days ?? 0,
-          carry_forward_days: 0,
-        };
-      });
-
-      await supabase.from('leave_balances').upsert(upsertRows, {
-        onConflict: 'user_id,leave_type,fiscal_year',
-        ignoreDuplicates: false,
-      });
+      const missing = leaveTypes.filter((lt) => !(data || []).some((b: any) => b.leave_type === lt));
+      if (missing.length > 0) {
+        await supabase.from('leave_balances').upsert(
+          missing.map((lt) => ({
+            user_id: user.id,
+            leave_type: lt,
+            fiscal_year: fy,
+            total_days: quotaValue(quota, lt),
+            used_days: 0,
+            carry_forward_days: 0,
+          })),
+          { onConflict: 'user_id,leave_type,fiscal_year', ignoreDuplicates: true },
+        );
+      }
 
       const { data: finalData } = await supabase
         .from('leave_balances')

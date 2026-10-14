@@ -884,7 +884,7 @@ export default function DailyReportPage() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[480px]">
                 <thead>
-                  <tr>{['Tank', 'Fuel', 'Dip reading (ft)', 'Ltr stock', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
+                  <tr>{['Tank', 'Fuel', 'Dip reading (mm)', 'Ltr stock', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                   {data.tanks.map((t) => (

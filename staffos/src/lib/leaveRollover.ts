@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { fetchSavedQuotas, quotaForRole, quotaValue } from './leaveQuotas';
 
 /**
  * Year-end leave rollover.
@@ -10,14 +11,6 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  * Safe to run more than once: the entitlement is recalculated from the
  * next-year row (total − carry), so carried days are never added twice.
  */
-
-// Same defaults as the Leave Admin screen.
-const DEFAULT_QUOTAS: Record<string, number> = {
-  substitute: 12,
-  paid: 15,
-  medical: 8,
-  half_day: 10,
-};
 
 // Unpaid leave is not an entitlement, so it is never carried.
 const CARRYABLE_TYPES_EXCLUDE = ['unpaid'];
@@ -42,16 +35,8 @@ export async function rolloverLeave(
   const empty: RolloverResult = { employeesAffected: 0, rowsWritten: 0, daysCarried: 0 };
   if (firmIds.length === 0) return empty;
 
-  // Entitlements for the new year, if the director has set them.
-  const { data: quotaRow, error: quotaErr } = await supabase
-    .from('director_settings')
-    .select('setting_value')
-    .eq('setting_key', 'leave_quotas_by_fy')
-    .maybeSingle();
-  if (quotaErr) throw quotaErr;
-  const fyKey = `${toFY}-${toFY + 1}`;
-  const savedQuotas: Record<string, number> =
-    ((quotaRow?.setting_value as Record<string, Record<string, number>> | null)?.[fyKey]) ?? {};
+  // Entitlements per role, from Director Settings (same source as every leave screen).
+  const savedQuotas = await fetchSavedQuotas(supabase);
 
   // Closing year balances.
   const { data: prevRows, error: prevErr } = await supabase
@@ -62,6 +47,18 @@ export async function rolloverLeave(
     .not('leave_type', 'in', `(${CARRYABLE_TYPES_EXCLUDE.join(',')})`);
   if (prevErr) throw prevErr;
   if (!prevRows || prevRows.length === 0) return empty;
+
+  // Role of each employee, to pick the right entitlement.
+  const userIds = Array.from(new Set((prevRows as any[]).map((r) => r.user_id)));
+  const roleOf = new Map<string, string | null>();
+  for (let i = 0; i < userIds.length; i += 500) {
+    const { data: profiles, error: profErr } = await supabase
+      .from('user_profiles')
+      .select('id, role')
+      .in('id', userIds.slice(i, i + 500));
+    if (profErr) throw profErr;
+    for (const pr of (profiles || []) as any[]) roleOf.set(pr.id, pr.role ?? null);
+  }
 
   // Rows that already exist for the new year (keeps approved leave and avoids double-carrying).
   const { data: nextRows, error: nextErr } = await supabase
@@ -91,7 +88,7 @@ export async function rolloverLeave(
     // Entitlement for the new year, without any carry already added to it.
     const entitlement = existing
       ? existing.total_days - existing.carry_forward_days
-      : (savedQuotas[p.leave_type] ?? DEFAULT_QUOTAS[p.leave_type] ?? 0);
+      : quotaValue(quotaForRole(savedQuotas, roleOf.get(p.user_id)), p.leave_type);
 
     rows.push({
       user_id: p.user_id,
