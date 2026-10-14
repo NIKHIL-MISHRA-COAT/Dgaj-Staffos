@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import AppLogo from '@/components/ui/AppLogo';
-import { LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare, BarChart3, Fuel, Settings, ChevronLeft, ChevronRight, ChevronDown, Wallet, BookOpen, Crown, X, UserCircle, UserCog, Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command, Navigation, ClipboardList, Building2, SlidersHorizontal, AlertTriangle, ScrollText, BookMarked, CheckSquare, ListTodo, Repeat, PieChart, TrendingUp, LogOut } from 'lucide-react';
+import { LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare, BarChart3, Settings, ChevronLeft, ChevronRight, ChevronDown, Wallet, BookOpen, Crown, X, UserCircle, UserCog, Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command, Navigation, ClipboardList, Building2, SlidersHorizontal, AlertTriangle, ScrollText, BookMarked, CheckSquare, ListTodo, Repeat, PieChart, TrendingUp, LogOut } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useRouter } from 'next/navigation';
@@ -45,7 +45,7 @@ const navItems: NavItem[] = [
   { id: 'nav-discrepancy', label: 'Client Discrepancies', icon: AlertTriangle, href: '/client-discrepancy-reports', group: 'collaborate' },
 
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
-  { id: 'nav-daily-report', label: 'Daily Report', icon: Fuel, href: '/daily-report', group: 'resources' },
+  { id: 'nav-daily-report', label: 'Daily Report', icon: ClipboardList, href: '/daily-report', group: 'resources' },
   { id: 'nav-user-mgmt', label: 'User Management', icon: UserCog, href: '/user-management', group: 'resources', managerOnly: true },
   { id: 'nav-app-settings', label: 'App Settings', icon: SlidersHorizontal, href: '/app-settings', group: 'resources' },
 
@@ -54,7 +54,6 @@ const navItems: NavItem[] = [
   { id: 'nav-firm-config', label: 'Firm Configuration', icon: Building2, href: '/firm-configuration', group: 'director_only' },
   { id: 'nav-firm-reports', label: 'Firm Reports', icon: TrendingUp, href: '/firm-reports', group: 'director_only' },
   { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'director_only' },
-  
   { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'director_only' },
   { id: 'nav-audit-log', label: 'Audit Log', icon: ScrollText, href: '/audit-log', group: 'director_only' },
   { id: 'nav-live-map', label: 'Live Locations', icon: Navigation, href: '/live-location-map', group: 'director_only' },

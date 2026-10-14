@@ -26,6 +26,7 @@ const config: Record<string, NotificationVisual> = {
   collab_invited:       { icon: UserPlus,      color: 'text-indigo-600',  bg: 'bg-indigo-50' },
   recurring_assigned:   { icon: Repeat,        color: 'text-purple-600',  bg: 'bg-purple-50' },
   recurring_overdue:    { icon: AlertTriangle, color: 'text-red-500',     bg: 'bg-red-50' },
+  recurring_task_week_ahead: { icon: Repeat,       color: 'text-amber-600',   bg: 'bg-amber-50' },
   // Company
   holiday_added:        { icon: Palmtree,      color: 'text-teal-600',    bg: 'bg-teal-50' },
   document_added:       { icon: FileText,      color: 'text-sky-600',     bg: 'bg-sky-50' },

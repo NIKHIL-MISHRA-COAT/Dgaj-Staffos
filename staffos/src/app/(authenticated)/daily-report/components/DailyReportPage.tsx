@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  BarChart, Bar, LineChart, Line, ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { Save, Plus, Trash2, Loader2, BarChart3, Fuel } from 'lucide-react';
 import { toast } from 'sonner';
@@ -13,24 +13,41 @@ import { useAuth } from '@/contexts/AuthContext';
 // Types
 // ---------------------------------------------------------------------------
 
-interface Fuel_ { id: string; name: string; price: string; daySales: string; purchase: string; totalStock: string }
-interface Nozzle { id: string; fuel: string; opening: string; closing: string; test: string }
+interface FuelRow {
+  id: string;
+  name: string;
+  price: string;       // snapshot saved with the day; '' = use the rate for that date
+  daySales: string;    // litres sold
+  purchase: string;
+  totalStock: string;
+}
 interface Tank { id: string; name: string; fuel: string; dip: string; ltr: string }
-interface Expense { id: string; particulars: string; amount: string; mode: 'cash' | 'online' }
+interface Expense {
+  id: string;
+  purpose: string;
+  paidTo: string;
+  amount: string;      // amount paid
+  toPay: string;       // amount still to be paid
+  mode: 'cash' | 'online';
+  note: string;        // e.g. bank details
+  enteredBy: string;
+}
 
 interface ReportData {
-  fuels: Fuel_[];
-  nozzles: Nozzle[];
+  fuels: FuelRow[];
   tanks: Tank[];
-  sales: { cash: string; card: string; online: string; credit: string; other: string };
+  sales: { cash: string; upi: string };  // upi is used by hospital reports only
   cashInHand: string;
   expenses: Expense[];
 }
 
-type Period = 'week' | 'month' | 'quarter' | 'year';
+type ReportType = 'fuel' | 'hospital';
+interface RateRow { fuel_key: string; rate: number; effective_from: string; created_by: string | null }
+type Period = 'week' | 'month' | 'quarter' | 'year' | 'custom';
 interface HistoryRow { firm_id: string; report_date: string; data: ReportData }
-interface FirmOption { id: string; name: string; code: string | null }
+interface FirmOption { id: string; name: string; code: string | null; reportType: ReportType }
 interface DayRow { firm_id: string; updated_by: string | null; updated_at: string | null; data: ReportData }
+interface Bucket { key: string; label: string; start: string; end: string }
 
 const ALL = '__all__'; // director-only view across every selected firm
 
@@ -40,15 +57,21 @@ const ALL = '__all__'; // director-only view across every selected firm
 
 const DEFAULT_FUELS = ['MS', 'HSD', 'POWER', 'TURBO', 'E20', 'XP95'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const PERIODS: { id: Period; label: string; days: number }[] = [
-  { id: 'week', label: 'Weekly', days: 84 },
-  { id: 'month', label: 'Monthly', days: 365 },
-  { id: 'quarter', label: 'Quarterly', days: 730 },
-  { id: 'year', label: 'Annual', days: 1826 },
+const PERIODS: { id: Period; label: string }[] = [
+  { id: 'week', label: 'Week (7 days)' },
+  { id: 'month', label: 'Month (weeks)' },
+  { id: 'quarter', label: 'Quarter (months)' },
+  { id: 'year', label: 'Year (months)' },
+  { id: 'custom', label: 'Custom (from – to)' },
 ];
+const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#ec4899', '#64748b'];
+const RATE_ROLES = ['director', 'manager', 'executive'];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-const num = (v: string) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+const num = (v: string | number | null | undefined) => {
+  const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+  return Number.isFinite(n) ? n : 0;
+};
 const fmtMoney = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 const fmtNum = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const fmtTime = (iso: string | null) => iso
@@ -63,68 +86,154 @@ const addDays = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth(), 
 function emptyReport(): ReportData {
   return {
     fuels: DEFAULT_FUELS.map((name) => ({ id: name.toLowerCase(), name, price: '', daySales: '', purchase: '', totalStock: '' })),
-    nozzles: Array.from({ length: 6 }, () => ({ id: uid(), fuel: 'ms', opening: '', closing: '', test: '' })),
     tanks: [
       { id: uid(), name: 'Tank 1', fuel: 'ms', dip: '', ltr: '' },
       { id: uid(), name: 'Tank 2', fuel: 'hsd', dip: '', ltr: '' },
       { id: uid(), name: 'Tank 3', fuel: 'power', dip: '', ltr: '' },
       { id: uid(), name: 'Tank 4', fuel: 'xp95', dip: '', ltr: '' },
     ],
-    sales: { cash: '', card: '', online: '', credit: '', other: '' },
+    sales: { cash: '', upi: '' },
     cashInHand: '',
     expenses: [],
   };
 }
 
 // Merge a saved row with defaults so older/partial rows still render
-function normalize(raw: Partial<ReportData> | null | undefined): ReportData {
+// (old rows may still contain nozzle or card/online fields; they are ignored)
+function normalize(raw: any): ReportData {
   const base = emptyReport();
   if (!raw) return base;
   return {
-    ...base,
-    ...raw,
-    fuels: raw.fuels?.length ? raw.fuels : base.fuels,
-    nozzles: raw.nozzles ?? base.nozzles,
+    fuels: raw.fuels?.length ? raw.fuels.map((f: any) => ({ price: '', ...f })) : base.fuels,
     tanks: raw.tanks ?? base.tanks,
-    sales: { ...base.sales, ...(raw.sales || {}) },
-    expenses: raw.expenses ?? [],
+    sales: { cash: raw.sales?.cash ?? '', upi: raw.sales?.upi ?? '' },
+    cashInHand: raw.cashInHand ?? '',
+    expenses: (raw.expenses ?? []).map((e: any) => ({
+      id: e.id ?? uid(),
+      purpose: e.purpose ?? e.particulars ?? '',
+      paidTo: e.paidTo ?? '',
+      amount: e.amount ?? '',
+      toPay: e.toPay ?? '',
+      mode: e.mode === 'online' ? 'online' : 'cash',
+      note: e.note ?? '',
+      enteredBy: e.enteredBy ?? '',
+    })),
   };
 }
 
 function summarize(d: ReportData) {
-  const fuelSaleAmount = d.fuels.reduce((s, f) => s + num(f.daySales) * num(f.price), 0);
-  const litres = d.fuels.reduce((s, f) => s + num(f.daySales), 0);
-  const inward = Object.values(d.sales).reduce((s, v) => s + num(v), 0);
-  const cashExp = d.expenses.filter((e) => e.mode === 'cash').reduce((s, e) => s + num(e.amount), 0);
-  const onlineExp = d.expenses.filter((e) => e.mode === 'online').reduce((s, e) => s + num(e.amount), 0);
+  const fuelRows = d.fuels.map((f) => {
+    const litres = num(f.daySales);
+    return { name: f.name || '—', litres, revenue: litres * num(f.price) };
+  });
+  const expPaid = d.expenses.reduce((s, e) => s + num(e.amount), 0);
   return {
-    fuelSaleAmount,
-    litres,
-    inward,
-    difference: fuelSaleAmount - inward,
+    fuelRows,
+    revenue: fuelRows.reduce((s, r) => s + r.revenue, 0),
+    litres: fuelRows.reduce((s, r) => s + r.litres, 0),
     cashSale: num(d.sales.cash),
-    cashExp,
-    onlineExp,
-    totalExp: cashExp + onlineExp,
+    upiSale: num(d.sales.upi),
+    hospitalTotal: num(d.sales.cash) + num(d.sales.upi),
     cashInHand: num(d.cashInHand),
+    paid: expPaid,
+    cashPaid: d.expenses.filter((e) => e.mode === 'cash').reduce((s, e) => s + num(e.amount), 0),
+    onlinePaid: d.expenses.filter((e) => e.mode === 'online').reduce((s, e) => s + num(e.amount), 0),
+    toPay: d.expenses.reduce((s, e) => s + num(e.toPay), 0),
+    balance: d.expenses.reduce((s, e) => s + Math.max(num(e.toPay) - num(e.amount), 0), 0),
   };
 }
 
-// Bucket key sorts correctly as a string: week = Monday's date, month = YYYY-MM, quarter = YYYY-Qn, year = YYYY
-function bucketOf(dateStr: string, period: Period): { key: string; label: string } {
-  const d = parseYmd(dateStr);
-  const y = d.getFullYear();
-  const m = d.getMonth();
+// The fixed buckets shown on the chart for the period that contains `anchor`.
+// Empty buckets are kept so the x-axis always shows the full period.
+function windowFor(anchor: Date, period: Period): Bucket[] {
+  const y = anchor.getFullYear();
+  const m = anchor.getMonth();
+
   if (period === 'week') {
-    const monday = addDays(d, -((d.getDay() + 6) % 7));
-    return { key: ymd(monday), label: `${monday.getDate()} ${MONTHS[monday.getMonth()]}` };
+    const monday = addDays(anchor, -((anchor.getDay() + 6) % 7));
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = addDays(monday, i);
+      const dayName = d.toLocaleDateString('en-IN', { weekday: 'short' });
+      return { key: ymd(d), label: `${dayName} ${d.getDate()} ${MONTHS[d.getMonth()]}`, start: ymd(d), end: ymd(d) };
+    });
   }
-  if (period === 'month') return { key: `${y}-${String(m + 1).padStart(2, '0')}`, label: `${MONTHS[m]} ${y}` };
+
+  if (period === 'month') {
+    const last = new Date(y, m + 1, 0).getDate();
+    const out: Bucket[] = [];
+    for (let w = 0, d1 = 1; d1 <= last; w++, d1 += 7) {
+      const d2 = Math.min(d1 + 6, last);
+      out.push({
+        key: `w${w + 1}`,
+        label: `Week ${w + 1} (${d1}–${d2} ${MONTHS[m]})`,
+        start: ymd(new Date(y, m, d1)),
+        end: ymd(new Date(y, m, d2)),
+      });
+    }
+    return out;
+  }
+
   if (period === 'quarter') {
-    const q = Math.floor(m / 3) + 1;
-    return { key: `${y}-Q${q}`, label: `Q${q} ${y}` };
+    const q0 = Math.floor(m / 3) * 3;
+    return [0, 1, 2].map((i) => {
+      const mm = q0 + i;
+      return {
+        key: `${y}-${String(mm + 1).padStart(2, '0')}`,
+        label: `${MONTHS[mm]} ${y}`,
+        start: ymd(new Date(y, mm, 1)),
+        end: ymd(new Date(y, mm + 1, 0)),
+      };
+    });
   }
-  return { key: `${y}`, label: `${y}` };
+
+  // year: twelve months
+  return MONTHS.map((name, mm) => ({
+    key: `${y}-${String(mm + 1).padStart(2, '0')}`,
+    label: `${name} ${y}`,
+    start: ymd(new Date(y, mm, 1)),
+    end: ymd(new Date(y, mm + 1, 0)),
+  }));
+}
+
+// Buckets for a custom from–to range: one per day up to 93 days, then one per month
+function customBuckets(from: string, to: string): Bucket[] {
+  const start = parseYmd(from);
+  let end = parseYmd(to);
+  if (end < start) end = start;
+  const days = Math.round((end.getTime() - start.getTime()) / 86400000);
+  if (days <= 92) {
+    return Array.from({ length: days + 1 }, (_, i) => {
+      const d = addDays(start, i);
+      return { key: ymd(d), label: `${d.getDate()} ${MONTHS[d.getMonth()]}`, start: ymd(d), end: ymd(d) };
+    });
+  }
+  const out: Bucket[] = [];
+  let cur = new Date(start.getFullYear(), start.getMonth(), 1);
+  while (cur <= end) {
+    const monthEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
+    const mStart = cur < start ? start : cur;
+    const mEnd = monthEnd > end ? end : monthEnd;
+    out.push({
+      key: `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`,
+      label: `${MONTHS[cur.getMonth()]} ${cur.getFullYear()}`,
+      start: ymd(mStart),
+      end: ymd(mEnd),
+    });
+    cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+  }
+  return out;
+}
+
+// Which bucket a saved day falls into for the chosen period
+function keyFor(dateStr: string, period: Period, customMonthly = false): string {
+  const d = parseYmd(dateStr);
+  if (period === 'custom') {
+    return customMonthly ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : dateStr;
+  }
+  if (period === 'week') return dateStr;
+  if (period === 'month') return `w${Math.floor((d.getDate() - 1) / 7) + 1}`;
+  if (period === 'quarter') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
 const inputCls = 'w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-300 disabled:opacity-60';
@@ -140,7 +249,9 @@ export default function DailyReportPage() {
   const { pinSession, effectiveUserId } = useAuth();
   const supabase = createClient();
 
-  const isDirector = pinSession?.role === 'director';
+  const role = pinSession?.role || '';
+  const isDirector = role === 'director';
+  const canSetRates = RATE_ROLES.includes(role);
 
   const [date, setDate] = useState(() => ymd(new Date()));
   const [firms, setFirms] = useState<FirmOption[]>([]);
@@ -151,23 +262,61 @@ export default function DailyReportPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [updaterName, setUpdaterName] = useState('');
+  const [defaultPerson, setDefaultPerson] = useState('');
   const [dayRows, setDayRows] = useState<DayRow[]>([]);
 
-  const [period, setPeriod] = useState<Period>('month');
+  const [rates, setRates] = useState<RateRow[]>([]);
+  const [ratesKey, setRatesKey] = useState(0);
+  const [editingRates, setEditingRates] = useState(false);
+  const [rateDraft, setRateDraft] = useState<Record<string, string>>({});
+  const [rateDate, setRateDate] = useState(() => ymd(new Date()));
+
+  const [period, setPeriod] = useState<Period>('week');
+  // Separate date for the charts (independent of the entry date)
+  const [chartDate, setChartDate] = useState(() => ymd(new Date()));
+  const [customFrom, setCustomFrom] = useState(() => { const n = new Date(); return ymd(new Date(n.getFullYear(), n.getMonth(), 1)); });
+  const [customTo, setCustomTo] = useState(() => ymd(new Date()));
   const [history, setHistory] = useState<HistoryRow[]>([]);
+  // Rates for the trend: a day saved without a price uses the rate in force on that day
+  const [historyRates, setHistoryRates] = useState<{ firm_id: string; fuel_key: string; rate: number; effective_from: string }[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
   const isAll = firmId === ALL;
   const firmIds = useMemo(() => firms.map((f) => f.id), [firms]);
   const firmName = isAll ? 'All firms' : (firms.find((f) => f.id === firmId)?.name || '');
+  // Hospital firms get a sales-only report (cash / UPI / expenses / cash in hand)
+  const isHospitalSingle = !isAll && (firms.find((f) => f.id === firmId)?.reportType === 'hospital');
+
+  // Rate in force for a fuel on the selected date (latest rate on or before that date)
+  const rateFor = useCallback((fuelKey: string, onDate: string): number | null => {
+    const r = rates.find((x) => x.fuel_key === fuelKey && x.effective_from <= onDate);
+    return r ? Number(r.rate) : null;
+  }, [rates]);
+
+  // Price used for the day: the saved snapshot, otherwise the rate for that date
+  const liveData: ReportData = useMemo(() => ({
+    ...data,
+    fuels: data.fuels.map((f) => ({
+      ...f,
+      price: f.price !== '' ? f.price : String(rateFor(f.id, date) ?? ''),
+    })),
+  }), [data, rateFor, date]);
+
+  const totals = useMemo(() => summarize(liveData), [liveData]);
 
   // Firms this user may see: directors → every firm in the daily report;
   // employees → only the firms they are assigned to as editor.
   useEffect(() => {
     if (!effectiveUserId) return;
     (async () => {
-      const { data: selectedRows } = await supabase.from('daily_report_firms').select('firm_id');
-      const selected = (selectedRows || []).map((r: { firm_id: string }) => r.firm_id);
+      const { data: selectedRows } = await supabase.from('daily_report_firms').select('firm_id, report_type');
+      const typeMap = new Map<string, ReportType>(
+        (selectedRows || []).map((r: { firm_id: string; report_type: string | null }) => [
+          r.firm_id,
+          r.report_type === 'hospital' ? 'hospital' : 'fuel',
+        ]),
+      );
+      const selected = Array.from(typeMap.keys());
       let allowed = selected;
       if (!isDirector) {
         const { data: assignedRows } = await supabase
@@ -182,19 +331,52 @@ export default function DailyReportPage() {
         return;
       }
       const { data: list } = await supabase.from('firms').select('id, name, code').in('id', allowed).order('name');
-      const options = (list as FirmOption[]) || [];
+      const options: FirmOption[] = ((list as Omit<FirmOption, 'reportType'>[]) || []).map((f) => ({
+        ...f,
+        reportType: typeMap.get(f.id) ?? 'fuel',
+      }));
       setFirms(options);
       setFirmId((cur) => cur || (isDirector && options.length > 1 ? ALL : options[0]?.id || ''));
       setFirmsLoaded(true);
     })();
   }, [effectiveUserId, isDirector]);
 
-  // Name of the person entering data (shown as "updated by")
+  // Name of the person logged in (shown as "updated by")
   useEffect(() => {
     if (!effectiveUserId) return;
     supabase.from('user_profiles').select('full_name').eq('id', effectiveUserId).maybeSingle()
       .then(({ data: p }) => setUpdaterName(p?.full_name || 'Unknown'));
   }, [effectiveUserId]);
+
+  // Default person for new expenses = the firm's assigned editor
+  // (the logged-in user if they are one of the editors, otherwise the first editor)
+  useEffect(() => {
+    if (!firmId || isAll) return;
+    (async () => {
+      const { data: eds } = await supabase.from('daily_report_editors')
+        .select('user_id').eq('firm_id', firmId).order('assigned_at', { ascending: true });
+      const ids = (eds || []).map((e: { user_id: string }) => e.user_id);
+      if (ids.length === 0) { setDefaultPerson(updaterName); return; }
+      const { data: ps } = await supabase.from('user_profiles').select('id, full_name').in('id', ids);
+      const names = (ps || []).map((p: { id: string; full_name: string | null }) => p.full_name || 'Unknown');
+      const mine = ids.includes(effectiveUserId || '') ? updaterName : '';
+      setDefaultPerson(mine || names[0] || updaterName);
+    })();
+  }, [firmId, isAll, updaterName]);
+
+  // Rates for the selected firm (newest first)
+  useEffect(() => {
+    if (!firmId || isAll) { setRates([]); return; }
+    supabase.from('fuel_rates')
+      .select('fuel_key, rate, effective_from, created_by')
+      .eq('firm_id', firmId)
+      .order('effective_from', { ascending: false })
+      .order('created_at', { ascending: false })
+      .then(({ data: rows, error }) => {
+        if (error) toast.error('Could not load fuel rates');
+        setRates((rows as RateRow[]) || []);
+      });
+  }, [firmId, isAll, ratesKey]);
 
   // Load one firm's report for the selected day
   useEffect(() => {
@@ -207,7 +389,7 @@ export default function DailyReportPage() {
       .maybeSingle()
       .then(({ data: row, error }) => {
         if (error) toast.error('Could not load report');
-        setData(normalize(row?.data as ReportData | undefined));
+        setData(normalize(row?.data));
         setMeta(row ? { by: row.updated_by, at: row.updated_at } : null);
         setLoading(false);
       });
@@ -228,51 +410,109 @@ export default function DailyReportPage() {
       });
   }, [date, firmId, firmIds.join(',')]);
 
-  // Trend for the chosen firm, or all firms together
+  // Chart buckets for the period that contains the selected date
+  const windowBuckets = useMemo(
+    () => (period === 'custom' ? customBuckets(customFrom, customTo) : windowFor(parseYmd(chartDate), period)),
+    [chartDate, period, customFrom, customTo],
+  );
+  // Show every x-axis label while there are few buckets; thin them out for long custom ranges
+  const xInterval: number | 'preserveStartEnd' = windowBuckets.length > 35 ? 'preserveStartEnd' : 0;
+  const customMonthly = period === 'custom'
+    && Math.round((parseYmd(customTo).getTime() - parseYmd(customFrom).getTime()) / 86400000) > 92;
+
+  // Saved reports inside that window, for this firm or all firms together
   const loadHistory = useCallback(async () => {
     if (!firmId || firmIds.length === 0) return;
     setHistoryLoading(true);
-    const days = PERIODS.find((p) => p.id === period)?.days ?? 365;
-    const from = ymd(addDays(new Date(), -days));
-    let q = supabase.from('daily_station_reports').select('firm_id, report_date, data').gte('report_date', from);
+    const from = windowBuckets[0].start;
+    const to = windowBuckets[windowBuckets.length - 1].end;
+    let q = supabase.from('daily_station_reports')
+      .select('firm_id, report_date, data')
+      .gte('report_date', from)
+      .lte('report_date', to);
     q = isAll ? q.in('firm_id', firmIds) : q.eq('firm_id', firmId);
     const { data: rows, error } = await q.order('report_date', { ascending: true });
     if (error) toast.error('Could not load trend');
     setHistory((rows as HistoryRow[]) || []);
+
+    const { data: rateRows, error: rateErr } = await supabase
+      .from('fuel_rates')
+      .select('firm_id, fuel_key, rate, effective_from')
+      .in('firm_id', isAll ? firmIds : [firmId])
+      .lte('effective_from', to)
+      .order('effective_from', { ascending: false });
+    if (rateErr) toast.error('Could not load fuel rates for the trend');
+    setHistoryRates((rateRows as { firm_id: string; fuel_key: string; rate: number; effective_from: string }[]) || []);
     setHistoryLoading(false);
-  }, [period, firmId, firmIds.join(',')]);
+  }, [windowBuckets, firmId, firmIds.join(',')]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
-  const totals = useMemo(() => summarize(data), [data]);
+  // Chart rows: one per bucket, empty buckets included as zero
+  const { trendRows, fuelNames, tankNames } = useMemo(() => {
+    const names: string[] = [];
+    const tankNames: string[] = [];
+    type Agg = { cashSale: number; upi: number; paid: number; cashByDate: Map<string, number>; tankByDate: Map<string, Record<string, number>>; rev: Record<string, number>; lit: Record<string, number> };
+    const aggs = new Map<string, Agg>();
+    windowBuckets.forEach((b) => aggs.set(b.key, { cashSale: 0, upi: 0, paid: 0, cashByDate: new Map(), tankByDate: new Map(), rev: {}, lit: {} }));
 
-  const chartData = useMemo(() => {
-    type G = { key: string; label: string; sales: number; expenses: number; litres: number; cashByDate: Map<string, number> };
-    const groups = new Map<string, G>();
     history.forEach((row) => {
-      const { key, label } = bucketOf(row.report_date, period);
-      const s = summarize(normalize(row.data));
-      const g: G = groups.get(key) || { key, label, sales: 0, expenses: 0, litres: 0, cashByDate: new Map() };
-      g.sales += s.fuelSaleAmount;
-      g.expenses += s.totalExp;
-      g.litres += s.litres;
-      // Closing cash = cash in hand on the latest day in the bucket (summed across firms in all-firms view)
-      g.cashByDate.set(row.report_date, (g.cashByDate.get(row.report_date) || 0) + s.cashInHand);
-      groups.set(key, g);
-    });
-    return Array.from(groups.values())
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .map((g) => {
-        const latest = Array.from(g.cashByDate.keys()).sort().pop();
-        return {
-          key: g.key,
-          label: g.label,
-          sales: g.sales,
-          expenses: g.expenses,
-          cashInHand: latest ? g.cashByDate.get(latest) || 0 : 0,
-        };
+      const key = keyFor(row.report_date, period, customMonthly);
+      const a = aggs.get(key);
+      if (!a) return;
+      // Fill missing fuel prices with the rate in force on that day (newest rate first in historyRates)
+      const nd = normalize(row.data);
+      nd.fuels = nd.fuels.map((f) => {
+        if (f.price !== '') return f;
+        const r = historyRates.find((x) => x.firm_id === row.firm_id && x.fuel_key === f.id && x.effective_from <= row.report_date);
+        return { ...f, price: r ? String(r.rate) : '' };
       });
-  }, [history, period]);
+      const s = summarize(nd);
+      const dayTanks: Record<string, number> = {};
+      nd.tanks.forEach((t) => {
+        const n = t.name || '—';
+        if (!tankNames.includes(n)) tankNames.push(n);
+        dayTanks[n] = num(t.ltr);
+      });
+      a.tankByDate.set(row.report_date, dayTanks);
+      a.cashSale += s.cashSale;
+      a.upi += s.upiSale;
+      a.paid += s.paid;
+      a.cashByDate.set(row.report_date, (a.cashByDate.get(row.report_date) || 0) + s.cashInHand);
+      s.fuelRows.forEach((r) => {
+        if (!names.includes(r.name)) names.push(r.name);
+        a.rev[r.name] = (a.rev[r.name] || 0) + r.revenue;
+        a.lit[r.name] = (a.lit[r.name] || 0) + r.litres;
+      });
+    });
+
+    const rows = windowBuckets.map((b) => {
+      const a = aggs.get(b.key)!;
+      const latest = Array.from(a.cashByDate.keys()).sort().pop();
+      const revenue = Object.values(a.rev).reduce((s, v) => s + v, 0);
+      const out: Record<string, number | string> = {
+        label: b.label,
+        revenue,
+        cashSale: a.cashSale,
+        upiSale: a.upi,
+        // closing cash = cash in hand on the latest saved day in the bucket (summed across firms in all-firms view)
+        cashInHand: latest ? a.cashByDate.get(latest) || 0 : 0,
+        expensesPaid: a.paid,
+      };
+      // Tank stock: latest saved day in the bucket
+      const latestTankDay = Array.from(a.tankByDate.keys()).sort().pop();
+      const tankVals = latestTankDay ? a.tankByDate.get(latestTankDay) || {} : {};
+      tankNames.forEach((n, i) => { out[`tank${i}`] = tankVals[n] || 0; });
+      out.litTotal = Object.values(a.lit).reduce((s, v) => s + v, 0);
+      out.hospitalTotal = a.cashSale + a.upi;
+      names.forEach((n, i) => {
+        out[`rev${i}`] = a.rev[n] || 0;
+        out[`lit${i}`] = a.lit[n] || 0;
+      });
+      return out;
+    });
+    return { trendRows: rows, fuelNames: names, tankNames };
+  }, [history, historyRates, windowBuckets, period, customMonthly]);
 
   // ----- Save (single firm only) -----
   const save = async () => {
@@ -281,7 +521,7 @@ export default function DailyReportPage() {
     const { error } = await supabase
       .from('daily_station_reports')
       .upsert(
-        { firm_id: firmId, report_date: date, data, updated_by: updaterName || null },
+        { firm_id: firmId, report_date: date, data: liveData, updated_by: updaterName || null },
         { onConflict: 'firm_id,report_date' },
       );
     setSaving(false);
@@ -294,17 +534,48 @@ export default function DailyReportPage() {
     loadHistory();
   };
 
+  // ----- Rates -----
+  // Open the rate table for editing: every fuel shows its rate in force on the start date
+  const startEditRates = () => {
+    const draft: Record<string, string> = {};
+    data.fuels.forEach((f) => {
+      const r = rateFor(f.id, rateDate);
+      draft[f.id] = r === null ? '' : String(r);
+    });
+    setRateDraft(draft);
+    setEditingRates(true);
+  };
+
+  // Save only the fuels whose rate changed (one new row each, from the chosen date)
+  const saveRates = async () => {
+    if (!firmId || isAll) { toast.error('Choose a single firm to change rates'); return; }
+    const changes: { firm_id: string; fuel_key: string; rate: number; effective_from: string; created_by: string | null }[] = [];
+    for (const f of data.fuels) {
+      const raw = (rateDraft[f.id] ?? '').trim();
+      if (raw === '') continue;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 0) { toast.error(`Enter a valid rate (0 or more) for ${f.name}`); return; }
+      const current = rateFor(f.id, rateDate);
+      if (current !== null && Math.abs(current - value) < 0.005) continue;
+      changes.push({ firm_id: firmId, fuel_key: f.id, rate: value, effective_from: rateDate, created_by: updaterName || null });
+    }
+    if (changes.length === 0) { toast.info('No rate changes to save'); setEditingRates(false); return; }
+    const { error } = await supabase.from('fuel_rates').insert(changes);
+    if (error) { toast.error(`Could not save rates: ${error.message}`); return; }
+    toast.success(`${changes.length} rate${changes.length > 1 ? 's' : ''} saved`);
+    setEditingRates(false);
+    setRatesKey((k) => k + 1);
+  };
+
   // ----- Updaters -----
-  const setFuel = (id: string, patch: Partial<Fuel_>) =>
+  const setFuel = (id: string, patch: Partial<FuelRow>) =>
     setData((d) => ({ ...d, fuels: d.fuels.map((f) => (f.id === id ? { ...f, ...patch } : f)) }));
-  const setNozzle = (id: string, patch: Partial<Nozzle>) =>
-    setData((d) => ({ ...d, nozzles: d.nozzles.map((n) => (n.id === id ? { ...n, ...patch } : n)) }));
   const setTank = (id: string, patch: Partial<Tank>) =>
     setData((d) => ({ ...d, tanks: d.tanks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
   const setExpense = (id: string, patch: Partial<Expense>) =>
     setData((d) => ({ ...d, expenses: d.expenses.map((e) => (e.id === id ? { ...e, ...patch } : e)) }));
 
-  const fuelOptions = data.fuels.map((f) => <option key={f.id} value={f.id}>{f.name || '—'}</option>);
+  const fuelOptions = liveData.fuels.map((f) => <option key={f.id} value={f.id}>{f.name || '—'}</option>);
 
   // ----- Empty / loading states -----
   if (!firmsLoaded) {
@@ -319,13 +590,53 @@ export default function DailyReportPage() {
           <h1 className="text-lg font-bold text-slate-900 dark:text-slate-100">No firm assigned</h1>
           <p className="text-sm text-slate-500 mt-1">
             {isDirector
-              ? 'No firms are in the daily report yet. Add firms under Director Settings → Fuel Station Daily Report.'
+              ? 'No firms are in the daily report yet. Add firms under Director Settings → Daily Report.'
               : 'You have not been assigned to any firm\'s daily report. Ask a director to assign you under Director Settings.'}
           </p>
         </div>
       </div>
     );
   }
+
+  // Series for the combined trend chart, by report type
+  const fuelBlue = { key: 'revenue', name: 'Fuel revenue', color: '#3b82f6' };
+  const combinedSeries = isHospitalSingle
+    ? [
+        { key: 'cashSale', name: 'Cash sales', color: '#10b981' },
+        { key: 'upiSale', name: 'UPI sales', color: '#06b6d4' },
+        { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
+        { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
+      ]
+    : isAll
+      ? [
+          fuelBlue,
+          { key: 'cashSale', name: 'Cash sale', color: '#10b981' },
+          { key: 'upiSale', name: 'UPI sale', color: '#06b6d4' },
+          { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
+          { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
+        ]
+      : [
+          fuelBlue,
+          { key: 'cashSale', name: 'Cash sale', color: '#10b981' },
+          { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
+          { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
+        ];
+
+  const tiles = isHospitalSingle
+    ? [
+        { label: 'Total Sales Today', value: fmtMoney(totals.hospitalTotal), sub: 'Cash + UPI' },
+        { label: 'Cash Sales', value: fmtMoney(totals.cashSale), sub: 'Cash' },
+        { label: 'UPI Sales', value: fmtMoney(totals.upiSale), sub: 'UPI' },
+        { label: 'Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
+        { label: 'Expenses Paid', value: fmtMoney(totals.paid), sub: `Cash ${fmtMoney(totals.cashPaid)} · Online ${fmtMoney(totals.onlinePaid)}` },
+      ]
+    : [
+        { label: 'Revenue Today', value: fmtMoney(totals.revenue), sub: `${fmtNum(totals.litres)} L sold` },
+        { label: 'Cash Sale Today', value: fmtMoney(totals.cashSale), sub: 'Cash only' },
+        { label: 'Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
+        { label: 'Expenses Paid', value: fmtMoney(totals.paid), sub: `Cash ${fmtMoney(totals.cashPaid)} · Online ${fmtMoney(totals.onlinePaid)}` },
+        { label: 'Balance to Pay', value: fmtMoney(totals.balance), sub: `Total to pay ${fmtMoney(totals.toPay)}` },
+      ];
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
@@ -338,7 +649,7 @@ export default function DailyReportPage() {
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {isAll
               ? 'Every firm in the daily report, for the selected day and trend (view only; pick a firm to edit)'
-              : 'Fuel stock, tank dips, sales, cash in hand and expenses for the day'}
+              : 'Litres, revenue, cash and expenses for the day'}
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
@@ -373,9 +684,9 @@ export default function DailyReportPage() {
             <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Firms on {date}</h2>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[760px]">
+            <table className="w-full text-sm min-w-[860px]">
               <thead>
-                <tr>{['Firm', 'Sale (fuel)', 'Litres', 'Cash sale', 'Cash in hand', 'Expenses', 'Last updated'].map((h) => <th key={h} className={thCls}>{h}</th>)}</tr>
+                <tr>{['Firm', 'Revenue / total sales', 'Litres', 'Cash sale', 'UPI sale', 'Cash in hand', 'Expenses paid', 'Balance to pay', 'Last updated'].map((h) => <th key={h} className={thCls}>{h}</th>)}</tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                 {firms.map((f) => {
@@ -384,7 +695,7 @@ export default function DailyReportPage() {
                     return (
                       <tr key={f.id}>
                         <td className={tdCls + ' font-semibold'}>{f.name}</td>
-                        <td colSpan={6} className={tdCls + ' text-slate-400 italic'}>No report saved for this day</td>
+                        <td colSpan={8} className={tdCls + ' text-slate-400 italic'}>No report saved for this day</td>
                       </tr>
                     );
                   }
@@ -392,11 +703,13 @@ export default function DailyReportPage() {
                   return (
                     <tr key={f.id}>
                       <td className={tdCls + ' font-semibold'}>{f.name}</td>
-                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(s.fuelSaleAmount)}</td>
-                      <td className={tdCls + ' text-right tabular-nums'}>{fmtNum(s.litres)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(f.reportType === 'hospital' ? s.hospitalTotal : s.revenue)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{f.reportType === 'hospital' ? '—' : fmtNum(s.litres)}</td>
                       <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(s.cashSale)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{f.reportType === 'hospital' ? fmtMoney(s.upiSale) : '—'}</td>
                       <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(s.cashInHand)}</td>
-                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(s.totalExp)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(s.paid)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(s.balance)}</td>
                       <td className={tdCls + ' text-xs text-slate-500'}>{row.updated_by || '—'}{row.updated_at ? ` · ${fmtTime(row.updated_at)}` : ''}</td>
                     </tr>
                   );
@@ -414,13 +727,8 @@ export default function DailyReportPage() {
             </p>
           )}
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {[
-              { label: 'Sale Today (fuel)', value: fmtMoney(totals.fuelSaleAmount), sub: `${fmtNum(totals.litres)} L sold` },
-              { label: 'Cash Sale Today', value: fmtMoney(totals.cashSale), sub: 'Cash counter' },
-              { label: 'Total Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
-              { label: 'Expenses Today', value: fmtMoney(totals.totalExp), sub: `Cash ${fmtMoney(totals.cashExp)} · Online ${fmtMoney(totals.onlineExp)}` },
-            ].map((t) => (
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            {tiles.map((t) => (
               <div key={t.label} className={cardCls + ' p-4'}>
                 <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">{t.label}</p>
                 <p className="text-xl font-bold text-slate-900 dark:text-slate-100 tabular-nums mt-1">{t.value}</p>
@@ -429,12 +737,13 @@ export default function DailyReportPage() {
             ))}
           </div>
 
-          {/* Fuel stock & sales */}
+          {!isHospitalSingle && (<>
+          {/* Fuel: litres sold and revenue (rate comes from the rate table for the date) */}
           <div className={cardCls}>
             <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div>
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Stock Report by Fuel</h2>
-                <p className="text-[11px] text-slate-500">You can rename a fuel; tanks and nozzles pick it from this list.</p>
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fuel Sales &amp; Stock</h2>
+                <p className="text-[11px] text-slate-500">Rate is set by the manager and applied from its start date. Revenue = litres sold × rate.</p>
               </div>
               <button onClick={() => setData((d) => ({ ...d, fuels: [...d.fuels, { id: uid(), name: 'NEW FUEL', price: '', daySales: '', purchase: '', totalStock: '' }] }))}
                 className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add fuel</button>
@@ -443,34 +752,39 @@ export default function DailyReportPage() {
               <table className="w-full text-sm min-w-[860px]">
                 <thead>
                   <tr>
-                    {['Fuel', 'Price (₹/L)', 'Day sales (L)', 'Sale amount', 'Purchase (L)', 'Total stock (L)', 'Day +/- (L)'].map((h) => (
+                    {['Fuel', 'Rate (₹/L)', 'Litres sold', 'Revenue', 'Purchase (L)', 'Total stock (L)', 'Day +/- (L)'].map((h) => (
                       <th key={h} className={thCls}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {data.fuels.map((f) => (
-                    <tr key={f.id}>
-                      <td className={tdCls}><input className={inputCls + ' font-semibold'} value={f.name} onChange={(e) => setFuel(f.id, { name: e.target.value })} /></td>
-                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.price} onChange={(e) => setFuel(f.id, { price: e.target.value })} /></td>
-                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.daySales} onChange={(e) => setFuel(f.id, { daySales: e.target.value })} /></td>
-                      <td className={tdCls + ' text-right tabular-nums font-semibold'}>{fmtMoney(num(f.daySales) * num(f.price))}</td>
-                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.purchase} onChange={(e) => setFuel(f.id, { purchase: e.target.value })} /></td>
-                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.totalStock} onChange={(e) => setFuel(f.id, { totalStock: e.target.value })} /></td>
-                      <td className={tdCls + ' text-right tabular-nums ' + (num(f.purchase) - num(f.daySales) < 0 ? 'text-red-600' : 'text-emerald-600')}>
-                        {fmtNum(num(f.purchase) - num(f.daySales))}
-                      </td>
-                    </tr>
-                  ))}
+                  {liveData.fuels.map((f) => {
+                    const rate = num(f.price);
+                    return (
+                      <tr key={f.id}>
+                        <td className={tdCls}><input className={inputCls + ' font-semibold'} value={f.name} onChange={(e) => setFuel(f.id, { name: e.target.value })} /></td>
+                        <td className={tdCls + ' text-right tabular-nums ' + (rate === 0 ? 'text-red-600' : '')}>
+                          {rate === 0 ? 'No rate set' : fmtNum(rate)}
+                        </td>
+                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.daySales} onChange={(e) => setFuel(f.id, { daySales: e.target.value })} /></td>
+                        <td className={tdCls + ' text-right tabular-nums font-semibold'}>{fmtMoney(num(f.daySales) * rate)}</td>
+                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.purchase} onChange={(e) => setFuel(f.id, { purchase: e.target.value })} /></td>
+                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.totalStock} onChange={(e) => setFuel(f.id, { totalStock: e.target.value })} /></td>
+                        <td className={tdCls + ' text-right tabular-nums ' + (num(f.purchase) - num(f.daySales) < 0 ? 'text-red-600' : 'text-emerald-600')}>
+                          {fmtNum(num(f.purchase) - num(f.daySales))}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot>
                   <tr className="bg-slate-50 dark:bg-slate-700/50 font-semibold">
                     <td className={tdCls}>Total</td>
                     <td className={tdCls} />
                     <td className={tdCls + ' tabular-nums'}>{fmtNum(totals.litres)}</td>
-                    <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.fuelSaleAmount)}</td>
-                    <td className={tdCls + ' tabular-nums'}>{fmtNum(data.fuels.reduce((s, f) => s + num(f.purchase), 0))}</td>
-                    <td className={tdCls + ' tabular-nums'}>{fmtNum(data.fuels.reduce((s, f) => s + num(f.totalStock), 0))}</td>
+                    <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.revenue)}</td>
+                    <td className={tdCls + ' tabular-nums'}>{fmtNum(liveData.fuels.reduce((s, f) => s + num(f.purchase), 0))}</td>
+                    <td className={tdCls + ' tabular-nums'}>{fmtNum(liveData.fuels.reduce((s, f) => s + num(f.totalStock), 0))}</td>
                     <td className={tdCls} />
                   </tr>
                 </tfoot>
@@ -479,158 +793,242 @@ export default function DailyReportPage() {
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {/* Nozzle meters */}
-            <div className={cardCls}>
-              <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Nozzle Meter Readings</h2>
-                <button onClick={() => setData((d) => ({ ...d, nozzles: [...d.nozzles, { id: uid(), fuel: d.fuels[0]?.id || 'ms', opening: '', closing: '', test: '' }] }))}
-                  className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add nozzle</button>
+            {/* Cash sale and cash in hand (amounts only) */}
+            <div className={cardCls + ' p-4 space-y-3'}>
+              <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Cash</h2>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash sale for the day (₹)</label>
+                <input type="number" step="0.01" className={inputCls} value={data.sales.cash}
+                  onChange={(e) => setData((d) => ({ ...d, sales: { ...d.sales, cash: e.target.value } }))} />
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm min-w-[560px]">
-                  <thead>
-                    <tr>
-                      {['#', 'Fuel', 'Opening', 'Closing', 'Test', 'Net sales (L)', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                    {data.nozzles.map((n, i) => (
-                      <tr key={n.id}>
-                        <td className={tdCls + ' text-slate-500 text-xs'}>{i + 1}</td>
-                        <td className={tdCls}>
-                          <select className={inputCls} value={n.fuel} onChange={(e) => setNozzle(n.id, { fuel: e.target.value })}>{fuelOptions}</select>
-                        </td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={n.opening} onChange={(e) => setNozzle(n.id, { opening: e.target.value })} /></td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={n.closing} onChange={(e) => setNozzle(n.id, { closing: e.target.value })} /></td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={n.test} onChange={(e) => setNozzle(n.id, { test: e.target.value })} /></td>
-                        <td className={tdCls + ' text-right tabular-nums'}>{fmtNum(num(n.closing) - num(n.opening) - num(n.test))}</td>
-                        <td className={tdCls}>
-                          <button onClick={() => setData((d) => ({ ...d, nozzles: d.nozzles.filter((x) => x.id !== n.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash in hand for the day (₹)</label>
+                <input type="number" step="0.01" className={inputCls} value={data.cashInHand}
+                  onChange={(e) => setData((d) => ({ ...d, cashInHand: e.target.value }))} />
               </div>
             </div>
 
-            {/* Tank dips */}
-            <div className={cardCls}>
-              <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Tank Stock</h2>
-                  <p className="text-[11px] text-slate-500">Rename a tank (e.g. "Tank 1 MS") and pick its fuel.</p>
+            {/* Rates (managers, executives, directors) */}
+            <div className={cardCls + ' p-4 space-y-3'}>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fuel Rates</h2>
+                {canSetRates && !editingRates && (
+                  <button onClick={startEditRates} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Edit rates</button>
+                )}
+              </div>
+              {!canSetRates && <p className="text-xs text-slate-500">Only managers can change rates. Current rates are shown below.</p>}
+              {canSetRates && editingRates && (
+                <div className="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">Applies from</label>
+                    <input type="date" className={inputCls + ' w-44'} value={rateDate} onChange={(e) => setRateDate(e.target.value)} />
+                  </div>
+                  <p className="text-[11px] text-slate-500">Only rates you change are saved. Past days keep their rate.</p>
                 </div>
-                <button onClick={() => setData((d) => ({ ...d, tanks: [...d.tanks, { id: uid(), name: `Tank ${d.tanks.length + 1}`, fuel: d.fuels[0]?.id || 'ms', dip: '', ltr: '' }] }))}
-                  className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add tank</button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm min-w-[480px]">
-                  <thead>
-                    <tr>{['Tank', 'Fuel', 'Dip reading (ft)', 'Ltr stock', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                    {data.tanks.map((t) => (
-                      <tr key={t.id}>
-                        <td className={tdCls}><input className={inputCls} value={t.name} onChange={(e) => setTank(t.id, { name: e.target.value })} /></td>
-                        <td className={tdCls}>
-                          <select className={inputCls} value={t.fuel} onChange={(e) => setTank(t.id, { fuel: e.target.value })}>{fuelOptions}</select>
-                        </td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.dip} onChange={(e) => setTank(t.id, { dip: e.target.value })} /></td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.ltr} onChange={(e) => setTank(t.id, { ltr: e.target.value })} /></td>
-                        <td className={tdCls}>
-                          <button onClick={() => setData((d) => ({ ...d, tanks: d.tanks.filter((x) => x.id !== t.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
-                        </td>
+              )}
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    {(editingRates
+                      ? ['Fuel', 'New rate (₹/L)', 'Rate in force (' + rateDate + ')']
+                      : ['Fuel', 'Rate in force (' + date + ')', 'Changed on']
+                    ).map((h) => <th key={h} className={thCls}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                  {data.fuels.map((f) => {
+                    if (editingRates) {
+                      const inForce = rateFor(f.id, rateDate);
+                      return (
+                        <tr key={f.id}>
+                          <td className={tdCls + ' font-semibold'}>{f.name}</td>
+                          <td className={tdCls}>
+                            <input type="number" step="0.01" min="0" className={inputCls} value={rateDraft[f.id] ?? ''}
+                              onChange={(e) => setRateDraft((d) => ({ ...d, [f.id]: e.target.value }))} />
+                          </td>
+                          <td className={tdCls + ' tabular-nums text-slate-500'}>{inForce === null ? 'Not set' : fmtNum(inForce)}</td>
+                        </tr>
+                      );
+                    }
+                    const current = rateFor(f.id, date);
+                    const row = rates.find((r) => r.fuel_key === f.id && r.effective_from <= date);
+                    return (
+                      <tr key={f.id}>
+                        <td className={tdCls + ' font-semibold'}>{f.name}</td>
+                        <td className={tdCls + ' tabular-nums'}>{current === null ? <span className="text-red-600">Not set</span> : fmtNum(current)}</td>
+                        <td className={tdCls + ' text-xs text-slate-500'}>{row ? row.effective_from : '—'}</td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {canSetRates && editingRates && (
+                <div className="flex justify-end gap-2 pt-1">
+                  <button onClick={() => setEditingRates(false)} className="text-xs font-semibold border border-slate-300 text-slate-600 hover:bg-slate-50 px-3 py-2 rounded-lg">Cancel</button>
+                  <button onClick={saveRates} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-2 rounded-lg">Save rates</button>
+                </div>
+              )}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {/* Sales */}
+          {/* Tanks */}
+          <div className={cardCls}>
+            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Tank Stock</h2>
+                <p className="text-[11px] text-slate-500">Rename a tank (e.g. "Tank 1 MS") and pick its fuel.</p>
+              </div>
+              <button onClick={() => setData((d) => ({ ...d, tanks: [...d.tanks, { id: uid(), name: `Tank ${d.tanks.length + 1}`, fuel: d.fuels[0]?.id || 'ms', dip: '', ltr: '' }] }))}
+                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add tank</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[480px]">
+                <thead>
+                  <tr>{['Tank', 'Fuel', 'Dip reading (ft)', 'Ltr stock', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                  {data.tanks.map((t) => (
+                    <tr key={t.id}>
+                      <td className={tdCls}><input className={inputCls} value={t.name} onChange={(e) => setTank(t.id, { name: e.target.value })} /></td>
+                      <td className={tdCls}>
+                        <select className={inputCls} value={t.fuel} onChange={(e) => setTank(t.id, { fuel: e.target.value })}>{fuelOptions}</select>
+                      </td>
+                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.dip} onChange={(e) => setTank(t.id, { dip: e.target.value })} /></td>
+                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.ltr} onChange={(e) => setTank(t.id, { ltr: e.target.value })} /></td>
+                      <td className={tdCls}>
+                        <button onClick={() => setData((d) => ({ ...d, tanks: d.tanks.filter((x) => x.id !== t.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          </>)}
+
+          {/* Hospital: day sales split into cash and UPI, with cash in hand */}
+          {isHospitalSingle && (
             <div className={cardCls + ' p-4 space-y-3'}>
-              <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Sales Today</h2>
-              {([
-                ['cash', 'Cash sale'],
-                ['card', 'Card / POS'],
-                ['online', 'Online (PhonePe / Paytm)'],
-                ['credit', 'Credit party sale'],
-                ['other', 'Other inward'],
-              ] as const).map(([key, label]) => (
-                <div key={key} className="grid grid-cols-2 items-center gap-3">
-                  <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">{label}</label>
-                  <input type="number" step="0.01" className={inputCls} value={data.sales[key]}
-                    onChange={(e) => setData((d) => ({ ...d, sales: { ...d.sales, [key]: e.target.value } }))} />
-                </div>
-              ))}
-              <div className="border-t border-slate-200 dark:border-slate-700 pt-3 text-sm space-y-1">
-                <div className="flex justify-between"><span className="text-slate-500">Total received</span><span className="tabular-nums font-semibold">{fmtMoney(totals.inward)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Fuel sale amount (from stock table)</span><span className="tabular-nums">{fmtMoney(totals.fuelSaleAmount)}</span></div>
-                <div className={'flex justify-between font-semibold ' + (Math.abs(totals.difference) < 0.5 ? 'text-emerald-600' : 'text-red-600')}>
-                  <span>Difference</span><span className="tabular-nums">{fmtMoney(totals.difference)}</span>
-                </div>
+              <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Sales &amp; Cash</h2>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash sales for the day (₹)</label>
+                <input type="number" step="0.01" className={inputCls} value={data.sales.cash}
+                  onChange={(e) => setData((d) => ({ ...d, sales: { ...d.sales, cash: e.target.value } }))} />
+              </div>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">UPI sales for the day (₹)</label>
+                <input type="number" step="0.01" className={inputCls} value={data.sales.upi}
+                  onChange={(e) => setData((d) => ({ ...d, sales: { ...d.sales, upi: e.target.value } }))} />
+              </div>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Total sales (₹)</label>
+                <p className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">{fmtMoney(totals.hospitalTotal)}</p>
+              </div>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash in hand for the day (₹)</label>
+                <input type="number" step="0.01" className={inputCls} value={data.cashInHand}
+                  onChange={(e) => setData((d) => ({ ...d, cashInHand: e.target.value }))} />
               </div>
             </div>
+          )}
 
-            {/* Cash & expenses */}
-            <div className={cardCls}>
-              <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Cash in Hand &amp; Expenses</h2>
-                <button onClick={() => setData((d) => ({ ...d, expenses: [...d.expenses, { id: uid(), particulars: '', amount: '', mode: 'cash' }] }))}
-                  className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add expense</button>
+          {/* Expenses: same records as the Expense Centre (see note at the bottom) */}
+          <div className={cardCls}>
+            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Expenses</h2>
+                <p className="text-[11px] text-slate-500">New lines are added under {defaultPerson || 'the assigned editor'}. Enter the amount paid, the amount still to pay, and a note (for example, bank details).</p>
               </div>
-              <div className="p-4 space-y-4">
-                <div className="grid grid-cols-2 items-center gap-3">
-                  <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Total cash in hand today</label>
-                  <input type="number" step="0.01" className={inputCls} value={data.cashInHand}
-                    onChange={(e) => setData((d) => ({ ...d, cashInHand: e.target.value }))} />
-                </div>
+              <button onClick={() => setData((d) => ({ ...d, expenses: [...d.expenses, { id: uid(), purpose: '', paidTo: '', amount: '', toPay: '', mode: 'cash', note: '', enteredBy: defaultPerson }] }))}
+                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add expense</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[1000px]">
+                <thead>
+                  <tr>{['Purpose', 'Paid to', 'Amount paid', 'Amount to pay', 'Balance', 'Paid by', 'Note', 'Entered by', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                  {data.expenses.map((e) => (
+                    <tr key={e.id}>
+                      <td className={tdCls}><input className={inputCls} value={e.purpose} onChange={(ev) => setExpense(e.id, { purpose: ev.target.value })} /></td>
+                      <td className={tdCls}><input className={inputCls} value={e.paidTo} onChange={(ev) => setExpense(e.id, { paidTo: ev.target.value })} /></td>
+                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={e.amount} onChange={(ev) => setExpense(e.id, { amount: ev.target.value })} /></td>
+                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={e.toPay} onChange={(ev) => setExpense(e.id, { toPay: ev.target.value })} /></td>
+                      <td className={tdCls + ' text-right tabular-nums ' + (Math.max(num(e.toPay) - num(e.amount), 0) > 0 ? 'text-red-600' : 'text-emerald-600')}>
+                        {fmtMoney(Math.max(num(e.toPay) - num(e.amount), 0))}
+                      </td>
+                      <td className={tdCls}>
+                        <select className={inputCls} value={e.mode} onChange={(ev) => setExpense(e.id, { mode: ev.target.value as 'cash' | 'online' })}>
+                          <option value="cash">Cash</option>
+                          <option value="online">Online</option>
+                        </select>
+                      </td>
+                      <td className={tdCls}><input className={inputCls} value={e.note} onChange={(ev) => setExpense(e.id, { note: ev.target.value })} /></td>
+                      <td className={tdCls}><input className={inputCls} value={e.enteredBy} onChange={(ev) => setExpense(e.id, { enteredBy: ev.target.value })} /></td>
+                      <td className={tdCls}>
+                        <button onClick={() => setData((d) => ({ ...d, expenses: d.expenses.filter((x) => x.id !== e.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
+                      </td>
+                    </tr>
+                  ))}
+                  {data.expenses.length === 0 && (
+                    <tr><td colSpan={9} className={tdCls + ' text-center text-slate-400 italic'}>No expenses for this day</td></tr>
+                  )}
+                </tbody>
                 {data.expenses.length > 0 && (
-                  <table className="w-full text-sm">
-                    <thead><tr>{['Particulars', 'Amount', 'Mode', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr></thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                      {data.expenses.map((e) => (
-                        <tr key={e.id}>
-                          <td className={tdCls}><input className={inputCls} value={e.particulars} onChange={(ev) => setExpense(e.id, { particulars: ev.target.value })} /></td>
-                          <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={e.amount} onChange={(ev) => setExpense(e.id, { amount: ev.target.value })} /></td>
-                          <td className={tdCls}>
-                            <select className={inputCls} value={e.mode} onChange={(ev) => setExpense(e.id, { mode: ev.target.value as 'cash' | 'online' })}>
-                              <option value="cash">Cash</option>
-                              <option value="online">Online</option>
-                            </select>
-                          </td>
-                          <td className={tdCls}>
-                            <button onClick={() => setData((d) => ({ ...d, expenses: d.expenses.filter((x) => x.id !== e.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <tfoot>
+                    <tr className="bg-slate-50 dark:bg-slate-700/50 font-semibold">
+                      <td className={tdCls} colSpan={2}>Total</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.paid)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.toPay)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.balance)}</td>
+                      <td colSpan={4} />
+                    </tr>
+                  </tfoot>
                 )}
-                <div className="border-t border-slate-200 dark:border-slate-700 pt-3 text-sm space-y-1">
-                  <div className="flex justify-between"><span className="text-slate-500">Cash expenses</span><span className="tabular-nums">{fmtMoney(totals.cashExp)}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Online expenses</span><span className="tabular-nums">{fmtMoney(totals.onlineExp)}</span></div>
-                  <div className="flex justify-between font-semibold"><span>Total expenses (cash + online)</span><span className="tabular-nums">{fmtMoney(totals.totalExp)}</span></div>
-                </div>
-              </div>
+              </table>
             </div>
           </div>
         </>
       )}
 
-      {/* Trend (chosen firm, or all firms together) */}
+      {/* Charts: buckets for the period containing the selected date */}
       <div className={cardCls + ' p-5'}>
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
             <BarChart3 size={16} className="text-indigo-500" />
             <div>
-              <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Trend{isAll ? ' · all firms' : ''}</h2>
-              <p className="text-xs text-slate-500">Sales and expenses (bars), closing cash in hand (line)</p>
+              <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                Trend{isAll ? ' · all firms' : ''} · {PERIODS.find((p) => p.id === period)?.label}
+              </h2>
+              <p className="text-xs text-slate-500">
+                {windowBuckets[0] && windowBuckets[windowBuckets.length - 1]
+                  ? `${windowBuckets[0].start} to ${windowBuckets[windowBuckets.length - 1].end}`
+                  : ''}
+              </p>
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-3">
+            {period === 'custom' ? (
+              <>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">From</label>
+                  <input type="date" value={customFrom} onChange={(e) => e.target.value && setCustomFrom(e.target.value)}
+                    className={inputCls + ' w-44'} />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">To</label>
+                  <input type="date" value={customTo} onChange={(e) => e.target.value && setCustomTo(e.target.value)}
+                    className={inputCls + ' w-44'} />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">Chart date</label>
+                <input type="date" value={chartDate} onChange={(e) => e.target.value && setChartDate(e.target.value)}
+                  className={inputCls + ' w-44'} />
+              </div>
+            )}
           <div className="flex rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
             {PERIODS.map((p) => (
               <button key={p.id} onClick={() => setPeriod(p.id)}
@@ -639,32 +1037,183 @@ export default function DailyReportPage() {
               </button>
             ))}
           </div>
+          </div>
         </div>
         {historyLoading ? (
           <div className="flex justify-center h-64 items-center"><Loader2 className="animate-spin text-indigo-500" /></div>
-        ) : chartData.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-center">
-            <p className="text-sm font-medium text-slate-500">No saved reports in this range yet</p>
-            <p className="text-xs text-slate-400 mt-1">Save a daily report to start the trend</p>
-          </div>
         ) : (
-          <ResponsiveContainer width="100%" height={300}>
-            <ComposedChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
-              <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="sales" name="Sales" fill="#3b82f6" radius={[4, 4, 0, 0]} maxBarSize={36} />
-              <Bar dataKey="expenses" name="Expenses" fill="#f59e0b" radius={[4, 4, 0, 0]} maxBarSize={36} />
-              <Line type="monotone" dataKey="cashInHand" name="Cash in hand" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} />
-            </ComposedChart>
-          </ResponsiveContainer>
+          <div className="space-y-6">
+            {isAll ? (<>
+            <div>
+              <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue, cash and expenses</p>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                  <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                  <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {combinedSeries.map((s) => (
+                    <Bar key={s.key} dataKey={s.key} name={s.name} fill={s.color} radius={[3, 3, 0, 0]} maxBarSize={24} />
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            {!isHospitalSingle && (
+            <div className="grid grid-cols-1 gap-6">
+              <div>
+                <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue by fuel (₹)</p>
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                    <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                    <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {fuelNames.map((n, i) => (
+                      <Bar key={`rev${i}`} dataKey={`rev${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={20} />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Litres sold by fuel (L)</p>
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                    <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                    <Tooltip formatter={(v: number) => `${fmtNum(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {fuelNames.map((n, i) => (
+                      <Bar key={`lit${i}`} dataKey={`lit${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={20} />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            )}
+            </>) : (<>
+              {isHospitalSingle ? (<>
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Cash sales and UPI sales (bars), total sales (line)</p>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <ComposedChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                      <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                      <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="cashSale" name="Cash sales" fill="#10b981" radius={[3, 3, 0, 0]} maxBarSize={40} />
+                      <Bar dataKey="upiSale" name="UPI sales" fill="#06b6d4" radius={[3, 3, 0, 0]} maxBarSize={40} />
+                      <Line type="monotone" dataKey="hospitalTotal" name="Total sales" stroke="#1e293b" strokeWidth={2} dot={{ r: 3 }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Expenses paid (line)</p>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <LineChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                      <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                      <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Line type="monotone" dataKey="expensesPaid" name="Expenses paid" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </>) : (<>
+                <div className="grid grid-cols-1 gap-6">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Cash sales and cash in hand (bars)</p>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                        <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        <Bar dataKey="cashSale" name="Cash sale" fill="#10b981" radius={[3, 3, 0, 0]} maxBarSize={40} />
+                        <Bar dataKey="cashInHand" name="Cash in hand" fill="#8b5cf6" radius={[3, 3, 0, 0]} maxBarSize={40} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Expenses paid (line)</p>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <LineChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                        <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        <Line type="monotone" dataKey="expensesPaid" name="Expenses paid" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-6">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Litres sold by fuel (bars), total litres (line)</p>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <ComposedChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                        <Tooltip formatter={(v: number) => `${fmtNum(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        {fuelNames.map((n, i) => (
+                          <Bar key={`lit${i}`} dataKey={`lit${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={24} />
+                        ))}
+                        <Line type="monotone" dataKey="litTotal" name="Total litres" stroke="#1e293b" strokeWidth={2} dot={{ r: 3 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue by fuel (bars), total revenue (line)</p>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <ComposedChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                        <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        {fuelNames.map((n, i) => (
+                          <Bar key={`rev${i}`} dataKey={`rev${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={24} />
+                        ))}
+                        <Line type="monotone" dataKey="revenue" name="Total revenue" stroke="#1e293b" strokeWidth={2} dot={{ r: 3 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Tank stock (litres, latest saved day in each period)</p>
+                  {tankNames.length === 0 ? (
+                    <p className="text-xs text-slate-400 italic py-10 text-center">No tank readings saved in this period yet</p>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={280}>
+                      <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                        <Tooltip formatter={(v: number) => `${fmtNum(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        {tankNames.map((n, i) => (
+                          <Bar key={`tank${i}`} dataKey={`tank${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={24} />
+                        ))}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </>)}
+            </>)}
+          </div>
         )}
       </div>
 
       <p className="text-xs text-slate-400">
-        Fuel and tank names can be changed at any time. Tanks and nozzles pick their fuel from the list above.
+        Fuel and tank names can be changed at any time. Rates are set by managers and apply from the date chosen; past days keep the rate they were saved with.
       </p>
     </div>
   );

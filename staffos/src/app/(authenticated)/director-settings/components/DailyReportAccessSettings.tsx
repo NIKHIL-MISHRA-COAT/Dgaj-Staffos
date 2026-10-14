@@ -8,14 +8,17 @@ import { toast } from 'sonner';
 interface FirmRow { id: string; name: string; code: string | null }
 interface Person { id: string; full_name: string | null; job_title: string | null; department: string | null }
 interface EditorRow { firm_id: string; user_id: string }
+type ReportType = 'fuel' | 'hospital';
 
-// Director Settings → Fuel Station Daily Report
+// Director Settings → Daily Report
 // 1. Choose which firms appear in the daily report.
-// 2. For each included firm, assign the employees who may edit its report.
+// 2. For each included firm, choose its report type (fuel station or hospital).
+// 3. For each included firm, assign the employees who may edit its report.
 export default function DailyReportAccessSettings() {
   const supabase = createClient();
   const [firms, setFirms] = useState<FirmRow[]>([]);
   const [included, setIncluded] = useState<Set<string>>(new Set());
+  const [types, setTypes] = useState<Record<string, ReportType>>({});
   const [editors, setEditors] = useState<EditorRow[]>([]);
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
@@ -25,13 +28,15 @@ export default function DailyReportAccessSettings() {
     setLoading(true);
     const [f, inc, ed, pp] = await Promise.all([
       supabase.from('firms').select('id, name, code').eq('is_active', true).order('name'),
-      supabase.from('daily_report_firms').select('firm_id'),
+      supabase.from('daily_report_firms').select('firm_id, report_type'),
       supabase.from('daily_report_editors').select('firm_id, user_id'),
       supabase.from('user_profiles').select('id, full_name, job_title, department').eq('is_active', true).order('full_name'),
     ]);
     if (f.error || inc.error || ed.error || pp.error) toast.error('Could not load daily report settings');
     setFirms((f.data as FirmRow[]) || []);
-    setIncluded(new Set((inc.data || []).map((r: { firm_id: string }) => r.firm_id)));
+    const incRows = (inc.data || []) as { firm_id: string; report_type: string | null }[];
+    setIncluded(new Set(incRows.map((r) => r.firm_id)));
+    setTypes(Object.fromEntries(incRows.map((r) => [r.firm_id, r.report_type === 'hospital' ? 'hospital' : 'fuel'])));
     setEditors((ed.data as EditorRow[]) || []);
     setPeople((pp.data as Person[]) || []);
     setLoading(false);
@@ -49,6 +54,15 @@ export default function DailyReportAccessSettings() {
     setBusy(false);
     if (error) { toast.error(`Could not update: ${error.message}`); return; }
     toast.success(on ? 'Firm added to daily report' : 'Firm removed from daily report');
+    load();
+  };
+
+  const setReportType = async (firmId: string, type: ReportType) => {
+    setBusy(true);
+    const { error } = await supabase.from('daily_report_firms').update({ report_type: type }).eq('firm_id', firmId);
+    setBusy(false);
+    if (error) { toast.error(`Could not update report type: ${error.message}`); return; }
+    toast.success(type === 'hospital' ? 'Hospital report selected' : 'Fuel station report selected');
     load();
   };
 
@@ -108,6 +122,18 @@ export default function DailyReportAccessSettings() {
 
             {isIncluded && (
               <div className="pl-7 space-y-2">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-semibold text-slate-600">Report type</p>
+                  <select
+                    value={types[firm.id] || 'fuel'}
+                    disabled={busy}
+                    onChange={(e) => setReportType(firm.id, e.target.value as ReportType)}
+                    className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
+                  >
+                    <option value="fuel">Fuel station (litres, rates, tanks, cash)</option>
+                    <option value="hospital">Hospital (cash sales, UPI sales, expenses, cash in hand)</option>
+                  </select>
+                </div>
                 <p className="text-xs font-semibold text-slate-600">Editors for this firm</p>
                 <div className="flex flex-wrap gap-2">
                   {assigned.length === 0 && <span className="text-xs text-slate-400 italic">No editor assigned yet</span>}

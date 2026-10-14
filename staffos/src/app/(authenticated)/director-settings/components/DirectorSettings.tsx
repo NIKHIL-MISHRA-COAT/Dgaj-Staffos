@@ -303,7 +303,7 @@ export default function DirectorSettings() {
     { id: 'tasks',          label: 'Task Limits',              icon: Briefcase,desc: 'Concurrent & daily task caps' },
     { id: 'overtime',       label: 'Overtime Thresholds',      icon: Clock,    desc: 'Daily, weekly & monthly limits' },
     { id: 'shifts',         label: 'Shift Defaults',           icon: Clock,    desc: 'Working hours per shift type' },
-    { id: 'daily_report',   label: 'Fuel Station Daily Report', icon: Briefcase, desc: 'Choose firms in the daily report and assign their editors' },
+    { id: 'daily_report',   label: 'Daily Report', icon: Briefcase, desc: 'Choose firms in the daily report, their report type and editors' },
   ];
 
   if (loadingSettings) {

@@ -5,7 +5,7 @@ import Link from 'next/link';
 import AppLogo from '@/components/ui/AppLogo';
 import {
   LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare,
-  BarChart3, Fuel, Settings, Wallet, BookOpen, Crown, X, UserCircle, UserCog,
+  BarChart3, Settings, Wallet, BookOpen, Crown, X, UserCircle, UserCog,
   Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command,
   Navigation, ClipboardList, Building2, SlidersHorizontal,
   AlertTriangle, ScrollText, BookMarked, LogOut, ChevronRight,
@@ -45,7 +45,7 @@ const navItems: NavItem[] = [
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
   { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'management' },
   { id: 'nav-reports', label: 'Reports', icon: FileText, href: '/reports', group: 'management' },
-  { id: 'nav-daily-report', label: 'Daily Report', icon: Fuel, href: '/daily-report', group: 'management' },
+  { id: 'nav-daily-report', label: 'Daily Report', icon: ClipboardList, href: '/daily-report', group: 'management' },
   { id: 'nav-user-mgmt', label: 'User Management', icon: UserCog, href: '/user-management', group: 'management' },
   { id: 'nav-live-map', label: 'Live Locations', icon: Navigation, href: '/live-location-map', group: 'management' },
   { id: 'nav-audit', label: 'Attendance Audit', icon: ClipboardList, href: '/attendance-audit', group: 'management' },

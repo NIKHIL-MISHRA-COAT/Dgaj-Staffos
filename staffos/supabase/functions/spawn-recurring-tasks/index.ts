@@ -373,6 +373,51 @@ Deno.serve(async (req) => {
     }
 
     results.notificationsSent = notificationInserts.length;
+
+    // ── STEP 6: One-week-ahead alert for HIGH-priority recurring tasks ─────────
+    // Goes to the in-app `notifications` table (the one the bell reads).
+    const weekAheadDate = new Date(today);
+    weekAheadDate.setUTCDate(weekAheadDate.getUTCDate() + 7);
+    const weekAheadStr = weekAheadDate.toISOString().split('T')[0];
+
+    const { data: weekAhead } = await supabase
+      .from('recurring_task_instances')
+      .select('id, task_name, assigned_to, due_date')
+      .eq('due_date', weekAheadStr)
+      .in('priority', ['high', 'critical'])
+      .in('status', ['pending', 'in_progress'])
+      .not('assigned_to', 'is', null);
+
+    let weekAheadSent = 0;
+    if (weekAhead && weekAhead.length > 0) {
+      const ids = weekAhead.map((i: { id: string }) => i.id);
+      // Skip instances already alerted (the function may run more than once a day)
+      const { data: alreadySent } = await supabase
+        .from('notifications')
+        .select('related_id')
+        .eq('type', 'recurring_task_week_ahead')
+        .in('related_id', ids);
+      const sentSet = new Set((alreadySent || []).map((n: { related_id: string }) => n.related_id));
+
+      const weekRows = weekAhead
+        .filter((inst: { id: string }) => !sentSet.has(inst.id))
+        .map((inst: { id: string; task_name: string; assigned_to: string; due_date: string }) => ({
+          user_id: inst.assigned_to,
+          type: 'recurring_task_week_ahead',
+          title: 'High-priority task due in 1 week',
+          message: `"${inst.task_name}" is due on ${inst.due_date}.`,
+          related_id: inst.id,
+          related_type: 'recurring_task_instance',
+        }));
+
+      if (weekRows.length > 0) {
+        const { error: weekErr } = await supabase.from('notifications').insert(weekRows);
+        if (weekErr) errors.push(`Week-ahead alerts: ${weekErr.message}`);
+        else weekAheadSent = weekRows.length;
+      }
+    }
+    results.weekAheadNotifications = weekAheadSent;
+
     results.date = todayStr;
     results.generationWindow = `backfill from start_date → ${toDateStr}`;
 
