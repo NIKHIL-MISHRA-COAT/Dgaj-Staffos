@@ -1225,9 +1225,28 @@ function CreateTaskModal({
     title: '', description: '', priority: 'medium' as Priority, assignees: [uid] as string[],
     // Defaults to the creator's own firm. Employees stay in it; directors and managers can pick a visible firm.
     firmId: ownFirmId || '',
-    due_date: '', due_time: '', recurring: '', category_id: '', client_org_id: '',
+    due_date: '', due_time: '', recurring: '', category_id: '',
+    // Client picker value: "client:<id>" (client organisation), "firm:<id>" (subsidiary) or "" (Internal)
+    pick: '',
   });
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
+
+  // Subsidiaries the user can see, offered alongside clients in the client picker
+  const [subs, setSubs] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!uid) return;
+    (async () => {
+      const { data: ids, error: rpcErr } = await supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'all' });
+      if (rpcErr || !ids || ids.length === 0) { setSubs([]); return; }
+      const { data, error } = await supabase
+        .from('firms')
+        .select('id, name')
+        .in('id', ids as string[])
+        .eq('firm_type', 'subsidiary')
+        .order('name', { ascending: true });
+      if (!error) setSubs((data as { id: string; name: string }[]) || []);
+    })();
+  }, [uid, supabase]);
 
   const inputCls = 'w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
   const labelCls = 'block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1';
@@ -1244,7 +1263,8 @@ function CreateTaskModal({
     try {
       const picked = users.filter(u => f.assignees.includes(u.id));
       const cat = categories.find(c => c.id === f.category_id);
-      const org = clients.find(c => c.id === f.client_org_id);
+      const org = f.pick.startsWith('client:') ? clients.find(c => c.id === f.pick.slice(7)) : undefined;
+      const sub = f.pick.startsWith('firm:') ? subs.find(s => s.id === f.pick.slice(5)) : undefined;
       const { error } = await supabase.from('tasks').insert({
         title: f.title.trim(),
         description: f.description,
@@ -1276,7 +1296,7 @@ function CreateTaskModal({
         category_id: cat?.id || null,
         client_org_id: org?.id || null,
         client_org_name: org?.name || null,
-        organisation_relates_to: org?.name || null,
+        organisation_relates_to: org?.name || sub?.name || null,
       });
       if (error) throw error;
       toast.success('Task created');
@@ -1399,9 +1419,18 @@ function CreateTaskModal({
             </div>
             <div>
               <label className={labelCls}>Client</label>
-              <select className={inputCls} value={f.client_org_id} onChange={e => set('client_org_id', e.target.value)}>
+              <select className={inputCls} value={f.pick} onChange={e => set('pick', e.target.value)}>
                 <option value="">Internal</option>
-                {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {subs.length > 0 && (
+                  <optgroup label="Subsidiaries">
+                    {subs.map(s => <option key={`firm:${s.id}`} value={`firm:${s.id}`}>{s.name}</option>)}
+                  </optgroup>
+                )}
+                {clients.length > 0 && (
+                  <optgroup label="Clients">
+                    {clients.map(c => <option key={`client:${c.id}`} value={`client:${c.id}`}>{c.name}</option>)}
+                  </optgroup>
+                )}
               </select>
             </div>
           </div>

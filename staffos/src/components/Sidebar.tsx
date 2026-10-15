@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import AppLogo from '@/components/ui/AppLogo';
-import { LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare, BarChart3, Settings, ChevronLeft, ChevronRight, ChevronDown, Wallet, BookOpen, Crown, X, UserCircle, UserCog, Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command, Navigation, ClipboardList, Building2, SlidersHorizontal, AlertTriangle, ScrollText, BookMarked, CheckSquare, ListTodo, Repeat, PieChart, TrendingUp, LogOut } from 'lucide-react';
+import { Briefcase, LayoutDashboard, Clock, CalendarDays, FileText, MessageSquare, BarChart3, Settings, ChevronLeft, ChevronRight, ChevronDown, Wallet, BookOpen, Crown, X, UserCircle, UserCog, Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command, Navigation, ClipboardList, Building2, SlidersHorizontal, AlertTriangle, ScrollText, BookMarked, CheckSquare, ListTodo, Repeat, PieChart, TrendingUp, LogOut } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useRouter } from 'next/navigation';
@@ -21,6 +21,7 @@ interface NavItem {
   badge?: number;
   group?: string;
   managerOnly?: boolean; // hidden from employees even though the group itself is open
+  directorOrManagerOnly?: boolean; // only directors and managers (not executives)
 }
 
 const navItems: NavItem[] = [
@@ -34,6 +35,7 @@ const navItems: NavItem[] = [
   { id: 'nav-profile', label: 'My Profile', icon: UserCircle, href: '/employee-profile', group: 'core' },
 
   // { id: 'nav-my-tasks', label: 'My Tasks', icon: ListTodo, href: '/all-tasks', group: 'tasks' },
+  { id: 'nav-task-management', label: 'Task Management', icon: ListTodo, href: '/task-management', group: 'tasks', directorOrManagerOnly: true },
   { id: 'nav-all-tasks', label: 'All Tasks', icon: CheckSquare, href: '/all-tasks', group: 'tasks' },
   { id: 'nav-task-analytics', label: 'Task Analytics', icon: PieChart, href: '/task-analytics', group: 'tasks', managerOnly: true },
   { id: 'nav-recurring-tasks', label: 'Recurring Tasks', icon: Repeat, href: '/recurring-tasks', group: 'tasks' },
@@ -42,6 +44,8 @@ const navItems: NavItem[] = [
   { id: 'nav-chat', label: 'Chat', icon: MessageSquare, href: '/chat', group: 'collaborate' },
   { id: 'nav-tickets', label: 'Ticket Centre', icon: Ticket, href: '/ticket-centre', group: 'collaborate' },
   { id: 'nav-expenses', label: 'Expense Centre', icon: Receipt, href: '/expense-centre', group: 'collaborate' },
+  
+  { id: 'nav-clients', label: 'Clients', icon: Briefcase, href: '/clients', group: 'collaborate', directorOrManagerOnly: true },
   { id: 'nav-discrepancy', label: 'Client Discrepancies', icon: AlertTriangle, href: '/client-discrepancy-reports', group: 'collaborate' },
 
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
@@ -200,6 +204,7 @@ export default function Sidebar({ activePath, onClose }: SidebarProps) {
             if (group.id === 'director_only') return isDirectorOnly;
             if (n.id === 'nav-daily-report') return dailyReportAccess;
             if (n.managerOnly) return isManagerOrDirector;
+            if (n.directorOrManagerOnly) return role === 'director' || role === 'manager';
             return true;
           });
 
@@ -239,6 +244,8 @@ export default function Sidebar({ activePath, onClose }: SidebarProps) {
                   : item.id === 'nav-profile' ? t('myProfile')
                   : item.id === 'nav-my-tasks' ? 'My Tasks'
                   : item.id === 'nav-all-tasks' ? 'All Tasks'
+                  : item.id === 'nav-task-management' ? 'Task Management'
+                  : item.id === 'nav-clients' ? 'Clients'
                   : item.id === 'nav-recurring-tasks' ? 'Recurring Tasks'
                   : item.id === 'nav-task-analytics' ? 'Task Analytics'
                   : item.id === 'nav-calendar' ? t('calendar')

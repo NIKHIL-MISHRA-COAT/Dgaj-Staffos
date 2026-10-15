@@ -20,6 +20,7 @@ interface FuelRow {
   daySales: string;    // litres sold
   purchase: string;
   totalStock: string;
+  costPrice: string;   // purchase cost per litre (₹/L), used for Capital
 }
 interface Tank { id: string; name: string; fuel: string; dip: string; ltr: string }
 interface Expense {
@@ -38,11 +39,12 @@ interface ReportData {
   tanks: Tank[];
   sales: { cash: string; upi: string };  // upi is used by hospital reports only
   cashInHand: string;
+  portalBalance: string;  // portal balance for the day (fuel reports)
   expenses: Expense[];
 }
 
 type ReportType = 'fuel' | 'hospital';
-interface RateRow { fuel_key: string; rate: number; effective_from: string; created_by: string | null }
+interface RateRow { fuel_key: string; rate: number; cost_price: number | null; effective_from: string; created_by: string | null }
 type Period = 'week' | 'month' | 'quarter' | 'year' | 'custom';
 interface HistoryRow { firm_id: string; report_date: string; data: ReportData }
 interface FirmOption { id: string; name: string; code: string | null; reportType: ReportType }
@@ -85,7 +87,7 @@ const addDays = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth(), 
 
 function emptyReport(): ReportData {
   return {
-    fuels: DEFAULT_FUELS.map((name) => ({ id: name.toLowerCase(), name, price: '', daySales: '', purchase: '', totalStock: '' })),
+    fuels: DEFAULT_FUELS.map((name) => ({ id: name.toLowerCase(), name, price: '', daySales: '', purchase: '', totalStock: '', costPrice: '' })),
     tanks: [
       { id: uid(), name: 'Tank 1', fuel: 'ms', dip: '', ltr: '' },
       { id: uid(), name: 'Tank 2', fuel: 'hsd', dip: '', ltr: '' },
@@ -94,6 +96,7 @@ function emptyReport(): ReportData {
     ],
     sales: { cash: '', upi: '' },
     cashInHand: '',
+    portalBalance: '',
     expenses: [],
   };
 }
@@ -104,10 +107,11 @@ function normalize(raw: any): ReportData {
   const base = emptyReport();
   if (!raw) return base;
   return {
-    fuels: raw.fuels?.length ? raw.fuels.map((f: any) => ({ price: '', ...f })) : base.fuels,
+    fuels: raw.fuels?.length ? raw.fuels.map((f: any) => ({ price: '', costPrice: '', ...f })) : base.fuels,
     tanks: raw.tanks ?? base.tanks,
     sales: { cash: raw.sales?.cash ?? '', upi: raw.sales?.upi ?? '' },
     cashInHand: raw.cashInHand ?? '',
+    portalBalance: raw.portalBalance ?? '',
     expenses: (raw.expenses ?? []).map((e: any) => ({
       id: e.id ?? uid(),
       purpose: e.purpose ?? e.particulars ?? '',
@@ -135,6 +139,10 @@ function summarize(d: ReportData) {
     upiSale: num(d.sales.upi),
     hospitalTotal: num(d.sales.cash) + num(d.sales.upi),
     cashInHand: num(d.cashInHand),
+    portalBalance: num(d.portalBalance),
+    // Capital = cash in hand + portal balance + (total stock × cost price) for each fuel
+    capital: num(d.cashInHand) + num(d.portalBalance)
+      + d.fuels.reduce((s, f) => s + num(f.totalStock) * num(f.costPrice), 0),
     paid: expPaid,
     cashPaid: d.expenses.filter((e) => e.mode === 'cash').reduce((s, e) => s + num(e.amount), 0),
     onlinePaid: d.expenses.filter((e) => e.mode === 'online').reduce((s, e) => s + num(e.amount), 0),
@@ -269,6 +277,7 @@ export default function DailyReportPage() {
   const [ratesKey, setRatesKey] = useState(0);
   const [editingRates, setEditingRates] = useState(false);
   const [rateDraft, setRateDraft] = useState<Record<string, string>>({});
+  const [costDraft, setCostDraft] = useState<Record<string, string>>({});
   const [rateDate, setRateDate] = useState(() => ymd(new Date()));
 
   const [period, setPeriod] = useState<Period>('week');
@@ -292,6 +301,10 @@ export default function DailyReportPage() {
     const r = rates.find((x) => x.fuel_key === fuelKey && x.effective_from <= onDate);
     return r ? Number(r.rate) : null;
   }, [rates]);
+  const costFor = useCallback((fuelKey: string, onDate: string): number | null => {
+    const r = rates.find((x) => x.fuel_key === fuelKey && x.effective_from <= onDate && x.cost_price != null);
+    return r ? Number(r.cost_price) : null;
+  }, [rates]);
 
   // Price used for the day: the saved snapshot, otherwise the rate for that date
   const liveData: ReportData = useMemo(() => ({
@@ -302,7 +315,15 @@ export default function DailyReportPage() {
     })),
   }), [data, rateFor, date]);
 
-  const totals = useMemo(() => summarize(liveData), [liveData]);
+  const stockValue = useMemo(
+    () => liveData.fuels.reduce((s, f) => s + num(f.totalStock) * (costFor(f.id, date) ?? 0), 0),
+    [liveData, costFor, date],
+  );
+  const totals = useMemo(() => {
+    const s = summarize(liveData);
+    return { ...s, capital: s.cashInHand + s.portalBalance + stockValue };
+  }, [liveData, stockValue]);
+
 
   // Firms this user may see: directors → every firm in the daily report;
   // employees → only the firms they are assigned to as editor.
@@ -368,7 +389,7 @@ export default function DailyReportPage() {
   useEffect(() => {
     if (!firmId || isAll) { setRates([]); return; }
     supabase.from('fuel_rates')
-      .select('fuel_key, rate, effective_from, created_by')
+      .select('fuel_key, rate, cost_price, effective_from, created_by')
       .eq('firm_id', firmId)
       .order('effective_from', { ascending: false })
       .order('created_at', { ascending: false })
@@ -538,26 +559,45 @@ export default function DailyReportPage() {
   // Open the rate table for editing: every fuel shows its rate in force on the start date
   const startEditRates = () => {
     const draft: Record<string, string> = {};
+    const cdraft: Record<string, string> = {};
     data.fuels.forEach((f) => {
       const r = rateFor(f.id, rateDate);
       draft[f.id] = r === null ? '' : String(r);
+      const c = costFor(f.id, rateDate);
+      cdraft[f.id] = c === null ? '' : String(c);
     });
     setRateDraft(draft);
+    setCostDraft(cdraft);
     setEditingRates(true);
   };
 
-  // Save only the fuels whose rate changed (one new row each, from the chosen date)
   const saveRates = async () => {
     if (!firmId || isAll) { toast.error('Choose a single firm to change rates'); return; }
-    const changes: { firm_id: string; fuel_key: string; rate: number; effective_from: string; created_by: string | null }[] = [];
+    const changes: { firm_id: string; fuel_key: string; rate: number; cost_price: number | null; effective_from: string; created_by: string | null }[] = [];
     for (const f of data.fuels) {
-      const raw = (rateDraft[f.id] ?? '').trim();
-      if (raw === '') continue;
-      const value = Number(raw);
-      if (!Number.isFinite(value) || value < 0) { toast.error(`Enter a valid rate (0 or more) for ${f.name}`); return; }
-      const current = rateFor(f.id, rateDate);
-      if (current !== null && Math.abs(current - value) < 0.005) continue;
-      changes.push({ firm_id: firmId, fuel_key: f.id, rate: value, effective_from: rateDate, created_by: updaterName || null });
+      const rawR = (rateDraft[f.id] ?? '').trim();
+      const rawC = (costDraft[f.id] ?? '').trim();
+      const newRate = rawR === '' ? null : Number(rawR);
+      const newCost = rawC === '' ? null : Number(rawC);
+      if (newRate !== null && (!Number.isFinite(newRate) || newRate < 0)) { toast.error(`Enter a valid rate for ${f.name}`); return; }
+      if (newCost !== null && (!Number.isFinite(newCost) || newCost < 0)) { toast.error(`Enter a valid cost price for ${f.name}`); return; }
+      const curRate = rateFor(f.id, rateDate);
+      const curCost = costFor(f.id, rateDate);
+      if (curRate === null && newRate === null) {
+        if (newCost !== null) { toast.error(`Set a sale rate for ${f.name} before its cost price`); return; }
+        continue;
+      }
+      const rateChanged = newRate !== null && (curRate === null || Math.abs(curRate - newRate) >= 0.005);
+      const costChanged = newCost !== null && (curCost === null || Math.abs(curCost - newCost) >= 0.005);
+      if (!rateChanged && !costChanged) continue;
+      changes.push({
+        firm_id: firmId,
+        fuel_key: f.id,
+        rate: newRate ?? (curRate as number),
+        cost_price: newCost ?? curCost,
+        effective_from: rateDate,
+        created_by: updaterName || null,
+      });
     }
     if (changes.length === 0) { toast.info('No rate changes to save'); setEditingRates(false); return; }
     const { error } = await supabase.from('fuel_rates').insert(changes);
@@ -602,41 +642,42 @@ export default function DailyReportPage() {
   const fuelBlue = { key: 'revenue', name: 'Fuel revenue', color: '#3b82f6' };
   const combinedSeries = isHospitalSingle
     ? [
-        { key: 'cashSale', name: 'Cash sales', color: '#10b981' },
-        { key: 'upiSale', name: 'UPI sales', color: '#06b6d4' },
-        { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
-        { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
-      ]
+      { key: 'cashSale', name: 'Cash sales', color: '#10b981' },
+      { key: 'upiSale', name: 'UPI sales', color: '#06b6d4' },
+      { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
+      { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
+    ]
     : isAll
       ? [
-          fuelBlue,
-          { key: 'cashSale', name: 'Cash sale', color: '#10b981' },
-          { key: 'upiSale', name: 'UPI sale', color: '#06b6d4' },
-          { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
-          { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
-        ]
+        fuelBlue,
+        { key: 'cashSale', name: 'Cash sale', color: '#10b981' },
+        { key: 'upiSale', name: 'UPI sale', color: '#06b6d4' },
+        { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
+        { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
+      ]
       : [
-          fuelBlue,
-          { key: 'cashSale', name: 'Cash sale', color: '#10b981' },
-          { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
-          { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
-        ];
+        fuelBlue,
+        { key: 'cashSale', name: 'Cash sale', color: '#10b981' },
+        { key: 'cashInHand', name: 'Cash in hand', color: '#8b5cf6' },
+        { key: 'expensesPaid', name: 'Expenses paid', color: '#f59e0b' },
+      ];
 
   const tiles = isHospitalSingle
     ? [
-        { label: 'Total Sales Today', value: fmtMoney(totals.hospitalTotal), sub: 'Cash + UPI' },
-        { label: 'Cash Sales', value: fmtMoney(totals.cashSale), sub: 'Cash' },
-        { label: 'UPI Sales', value: fmtMoney(totals.upiSale), sub: 'UPI' },
-        { label: 'Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
-        { label: 'Expenses Paid', value: fmtMoney(totals.paid), sub: `Cash ${fmtMoney(totals.cashPaid)} · Online ${fmtMoney(totals.onlinePaid)}` },
-      ]
+      { label: 'Total Sales Today', value: fmtMoney(totals.hospitalTotal), sub: 'Cash + UPI' },
+      { label: 'Cash Sales', value: fmtMoney(totals.cashSale), sub: 'Cash' },
+      { label: 'UPI Sales', value: fmtMoney(totals.upiSale), sub: 'UPI' },
+      { label: 'Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
+      { label: 'Expenses Paid', value: fmtMoney(totals.paid), sub: `Cash ${fmtMoney(totals.cashPaid)} · Online ${fmtMoney(totals.onlinePaid)}` },
+    ]
     : [
-        { label: 'Revenue Today', value: fmtMoney(totals.revenue), sub: `${fmtNum(totals.litres)} L sold` },
-        { label: 'Cash Sale Today', value: fmtMoney(totals.cashSale), sub: 'Cash only' },
-        { label: 'Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
-        { label: 'Expenses Paid', value: fmtMoney(totals.paid), sub: `Cash ${fmtMoney(totals.cashPaid)} · Online ${fmtMoney(totals.onlinePaid)}` },
-        { label: 'Balance to Pay', value: fmtMoney(totals.balance), sub: `Total to pay ${fmtMoney(totals.toPay)}` },
-      ];
+      { label: 'Capital', value: fmtMoney(totals.capital), sub: 'Cash + portal + stock at cost' },
+      { label: 'Revenue Today', value: fmtMoney(totals.revenue), sub: `${fmtNum(totals.litres)} L sold` },
+      { label: 'Cash Sale Today', value: fmtMoney(totals.cashSale), sub: 'Cash only' },
+      { label: 'Cash in Hand', value: fmtMoney(totals.cashInHand), sub: 'End of day' },
+      { label: 'Expenses Paid', value: fmtMoney(totals.paid), sub: `Cash ${fmtMoney(totals.cashPaid)} · Online ${fmtMoney(totals.onlinePaid)}` },
+      { label: 'Balance to Pay', value: fmtMoney(totals.balance), sub: `Total to pay ${fmtMoney(totals.toPay)}` },
+    ];
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
@@ -738,172 +779,194 @@ export default function DailyReportPage() {
           </div>
 
           {!isHospitalSingle && (<>
-          {/* Fuel: litres sold and revenue (rate comes from the rate table for the date) */}
-          <div className={cardCls}>
-            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fuel Sales &amp; Stock</h2>
-                <p className="text-[11px] text-slate-500">Rate is set by the manager and applied from its start date. Revenue = litres sold × rate.</p>
-              </div>
-              <button onClick={() => setData((d) => ({ ...d, fuels: [...d.fuels, { id: uid(), name: 'NEW FUEL', price: '', daySales: '', purchase: '', totalStock: '' }] }))}
-                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add fuel</button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[860px]">
-                <thead>
-                  <tr>
-                    {['Fuel', 'Rate (₹/L)', 'Litres sold', 'Revenue', 'Purchase (L)', 'Total stock (L)', 'Day +/- (L)'].map((h) => (
-                      <th key={h} className={thCls}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {liveData.fuels.map((f) => {
-                    const rate = num(f.price);
-                    return (
-                      <tr key={f.id}>
-                        <td className={tdCls}><input className={inputCls + ' font-semibold'} value={f.name} onChange={(e) => setFuel(f.id, { name: e.target.value })} /></td>
-                        <td className={tdCls + ' text-right tabular-nums ' + (rate === 0 ? 'text-red-600' : '')}>
-                          {rate === 0 ? 'No rate set' : fmtNum(rate)}
-                        </td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.daySales} onChange={(e) => setFuel(f.id, { daySales: e.target.value })} /></td>
-                        <td className={tdCls + ' text-right tabular-nums font-semibold'}>{fmtMoney(num(f.daySales) * rate)}</td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.purchase} onChange={(e) => setFuel(f.id, { purchase: e.target.value })} /></td>
-                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.totalStock} onChange={(e) => setFuel(f.id, { totalStock: e.target.value })} /></td>
-                        <td className={tdCls + ' text-right tabular-nums ' + (num(f.purchase) - num(f.daySales) < 0 ? 'text-red-600' : 'text-emerald-600')}>
-                          {fmtNum(num(f.purchase) - num(f.daySales))}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr className="bg-slate-50 dark:bg-slate-700/50 font-semibold">
-                    <td className={tdCls}>Total</td>
-                    <td className={tdCls} />
-                    <td className={tdCls + ' tabular-nums'}>{fmtNum(totals.litres)}</td>
-                    <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.revenue)}</td>
-                    <td className={tdCls + ' tabular-nums'}>{fmtNum(liveData.fuels.reduce((s, f) => s + num(f.purchase), 0))}</td>
-                    <td className={tdCls + ' tabular-nums'}>{fmtNum(liveData.fuels.reduce((s, f) => s + num(f.totalStock), 0))}</td>
-                    <td className={tdCls} />
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {/* Cash sale and cash in hand (amounts only) */}
-            <div className={cardCls + ' p-4 space-y-3'}>
-              <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Cash</h2>
-              <div className="grid grid-cols-2 items-center gap-3">
-                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash sale for the day (₹)</label>
-                <input type="number" step="0.01" className={inputCls} value={data.sales.cash}
-                  onChange={(e) => setData((d) => ({ ...d, sales: { ...d.sales, cash: e.target.value } }))} />
-              </div>
-              <div className="grid grid-cols-2 items-center gap-3">
-                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash in hand for the day (₹)</label>
-                <input type="number" step="0.01" className={inputCls} value={data.cashInHand}
-                  onChange={(e) => setData((d) => ({ ...d, cashInHand: e.target.value }))} />
-              </div>
-            </div>
-
-            {/* Rates (managers, executives, directors) */}
-            <div className={cardCls + ' p-4 space-y-3'}>
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fuel Rates</h2>
-                {canSetRates && !editingRates && (
-                  <button onClick={startEditRates} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Edit rates</button>
-                )}
-              </div>
-              {!canSetRates && <p className="text-xs text-slate-500">Only managers can change rates. Current rates are shown below.</p>}
-              {canSetRates && editingRates && (
-                <div className="flex flex-wrap items-end gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">Applies from</label>
-                    <input type="date" className={inputCls + ' w-44'} value={rateDate} onChange={(e) => setRateDate(e.target.value)} />
-                  </div>
-                  <p className="text-[11px] text-slate-500">Only rates you change are saved. Past days keep their rate.</p>
+            {/* Fuel: litres sold and revenue (rate comes from the rate table for the date) */}
+            <div className={cardCls}>
+              <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fuel Sales &amp; Stock</h2>
+                  <p className="text-[11px] text-slate-500">Rate is set by the manager and applied from its start date. Revenue = litres sold × rate.</p>
                 </div>
-              )}
-              <table className="w-full text-sm">
-                <thead>
-                  <tr>
-                    {(editingRates
-                      ? ['Fuel', 'New rate (₹/L)', 'Rate in force (' + rateDate + ')']
-                      : ['Fuel', 'Rate in force (' + date + ')', 'Changed on']
-                    ).map((h) => <th key={h} className={thCls}>{h}</th>)}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {data.fuels.map((f) => {
-                    if (editingRates) {
-                      const inForce = rateFor(f.id, rateDate);
+                <button onClick={() => setData((d) => ({ ...d, fuels: [...d.fuels, { id: uid(), name: 'NEW FUEL', price: '', daySales: '', purchase: '', totalStock: '', costPrice: '' }] }))}
+                  className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add fuel</button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[960px]">
+                  <thead>
+                    <tr>
+                      {['Fuel', 'Rate (₹/L)', 'Litres sold', 'Revenue', 'Purchase (L)', 'Total stock (L)', 'Day +/- (L)'].map((h) => (
+                        <th key={h} className={thCls}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                    {liveData.fuels.map((f) => {
+                      const rate = num(f.price);
+                      return (
+                        <tr key={f.id}>
+                          <td className={tdCls}><input className={inputCls + ' font-semibold'} value={f.name} onChange={(e) => setFuel(f.id, { name: e.target.value })} /></td>
+                          <td className={tdCls + ' text-right tabular-nums ' + (rate === 0 ? 'text-red-600' : '')}>
+                            {rate === 0 ? 'No rate set' : fmtNum(rate)}
+                          </td>
+                          {/* <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.costPrice} onChange={(e) => setFuel(f.id, { costPrice: e.target.value })} /></td> */}
+                          <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.daySales} onChange={(e) => setFuel(f.id, { daySales: e.target.value })} /></td>
+                          <td className={tdCls + ' text-right tabular-nums font-semibold'}>{fmtMoney(num(f.daySales) * rate)}</td>
+                          <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.purchase} onChange={(e) => setFuel(f.id, { purchase: e.target.value })} /></td>
+                          <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={f.totalStock} onChange={(e) => setFuel(f.id, { totalStock: e.target.value })} /></td>
+                          <td className={tdCls + ' text-right tabular-nums ' + (num(f.purchase) - num(f.daySales) < 0 ? 'text-red-600' : 'text-emerald-600')}>
+                            {fmtNum(num(f.purchase) - num(f.daySales))}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-50 dark:bg-slate-700/50 font-semibold">
+                      <td className={tdCls}>Total</td>
+
+                      <td className={tdCls} />
+                      <td className={tdCls + ' tabular-nums'}>{fmtNum(totals.litres)}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{fmtMoney(totals.revenue)}</td>
+                      <td className={tdCls + ' tabular-nums'}>{fmtNum(liveData.fuels.reduce((s, f) => s + num(f.purchase), 0))}</td>
+                      <td className={tdCls + ' tabular-nums'}>{fmtNum(liveData.fuels.reduce((s, f) => s + num(f.totalStock), 0))}</td>
+                      <td className={tdCls} />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            {/* Portal balance (own section) */}
+            <div className={cardCls + ' p-4 space-y-3'}>
+              <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Portal Balance</h2>
+              <div className="grid grid-cols-2 items-center gap-3">
+                <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Portal balance for the day (₹)</label>
+                <input type="number" step="0.01" className={inputCls} value={data.portalBalance}
+                  onChange={(e) => setData((d) => ({ ...d, portalBalance: e.target.value }))} />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              {/* Cash sale and cash in hand (amounts only) */}
+              <div className={cardCls + ' p-4 space-y-3'}>
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Cash</h2>
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash sale for the day (₹)</label>
+                  <input type="number" step="0.01" className={inputCls} value={data.sales.cash}
+                    onChange={(e) => setData((d) => ({ ...d, sales: { ...d.sales, cash: e.target.value } }))} />
+                </div>
+                <div className="grid grid-cols-2 items-center gap-3">
+                  <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Cash in hand for the day (₹)</label>
+                  <input type="number" step="0.01" className={inputCls} value={data.cashInHand}
+                    onChange={(e) => setData((d) => ({ ...d, cashInHand: e.target.value }))} />
+                </div>
+              </div>
+
+              
+              {/* Rates: sale rate and cost price, both dated */}
+              <div className={cardCls + ' p-4 space-y-3'}>
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Fuel Rates</h2>
+                  {canSetRates && !editingRates && (
+                    <button onClick={startEditRates} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Edit rates</button>
+                  )}
+                </div>
+                {!canSetRates && <p className="text-xs text-slate-500">Only managers can change rates. Current rates are shown below.</p>}
+                {canSetRates && editingRates && (
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">Applies from</label>
+                      <input type="date" className={inputCls + ' w-44'} value={rateDate} onChange={(e) => setRateDate(e.target.value)} />
+                    </div>
+                    <p className="text-[11px] text-slate-500">Only values you change are saved. Past days keep their rate and cost.</p>
+                  </div>
+                )}
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr>
+                      {(editingRates
+                        ? ['Fuel', 'Sale rate (₹/L)', 'Cost price (₹/L)', 'In force: rate / cost (' + rateDate + ')']
+                        : ['Fuel', 'Sale rate (₹/L)', 'Cost price (₹/L)', 'Changed on']
+                      ).map((h) => <th key={h} className={thCls}>{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                    {data.fuels.map((f) => {
+                      if (editingRates) {
+                        const inRate = rateFor(f.id, rateDate);
+                        const inCost = costFor(f.id, rateDate);
+                        return (
+                          <tr key={f.id}>
+                            <td className={tdCls + ' font-semibold'}>{f.name}</td>
+                            <td className={tdCls}>
+                              <input type="number" step="0.01" min="0" className={inputCls} value={rateDraft[f.id] ?? ''}
+                                onChange={(e) => setRateDraft((d) => ({ ...d, [f.id]: e.target.value }))} />
+                            </td>
+                            <td className={tdCls}>
+                              <input type="number" step="0.01" min="0" className={inputCls} value={costDraft[f.id] ?? ''}
+                                onChange={(e) => setCostDraft((d) => ({ ...d, [f.id]: e.target.value }))} />
+                            </td>
+                            <td className={tdCls + ' tabular-nums text-xs text-slate-500'}>
+                              {inRate === null ? 'Rate not set' : fmtNum(inRate)} / {inCost === null ? 'cost not set' : fmtNum(inCost)}
+                            </td>
+                          </tr>
+                        );
+                      }
+                      const current = rateFor(f.id, date);
+                      const cost = costFor(f.id, date);
+                      const row = rates.find((r) => r.fuel_key === f.id && r.effective_from <= date);
                       return (
                         <tr key={f.id}>
                           <td className={tdCls + ' font-semibold'}>{f.name}</td>
-                          <td className={tdCls}>
-                            <input type="number" step="0.01" min="0" className={inputCls} value={rateDraft[f.id] ?? ''}
-                              onChange={(e) => setRateDraft((d) => ({ ...d, [f.id]: e.target.value }))} />
-                          </td>
-                          <td className={tdCls + ' tabular-nums text-slate-500'}>{inForce === null ? 'Not set' : fmtNum(inForce)}</td>
+                          <td className={tdCls + ' tabular-nums'}>{current === null ? <span className="text-red-600">Not set</span> : fmtNum(current)}</td>
+                          <td className={tdCls + ' tabular-nums'}>{cost === null ? <span className="text-slate-400">Not set</span> : fmtNum(cost)}</td>
+                          <td className={tdCls + ' text-xs text-slate-500'}>{row ? row.effective_from : '—'}</td>
                         </tr>
                       );
-                    }
-                    const current = rateFor(f.id, date);
-                    const row = rates.find((r) => r.fuel_key === f.id && r.effective_from <= date);
-                    return (
-                      <tr key={f.id}>
-                        <td className={tdCls + ' font-semibold'}>{f.name}</td>
-                        <td className={tdCls + ' tabular-nums'}>{current === null ? <span className="text-red-600">Not set</span> : fmtNum(current)}</td>
-                        <td className={tdCls + ' text-xs text-slate-500'}>{row ? row.effective_from : '—'}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {canSetRates && editingRates && (
-                <div className="flex justify-end gap-2 pt-1">
-                  <button onClick={() => setEditingRates(false)} className="text-xs font-semibold border border-slate-300 text-slate-600 hover:bg-slate-50 px-3 py-2 rounded-lg">Cancel</button>
-                  <button onClick={saveRates} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-2 rounded-lg">Save rates</button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Tanks */}
-          <div className={cardCls}>
-            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Tank Stock</h2>
-                <p className="text-[11px] text-slate-500">Rename a tank (e.g. "Tank 1 MS") and pick its fuel.</p>
+                    })}
+                  </tbody>
+                </table>
+                {canSetRates && editingRates && (
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button onClick={() => setEditingRates(false)} className="text-xs font-semibold border border-slate-300 text-slate-600 hover:bg-slate-50 px-3 py-2 rounded-lg">Cancel</button>
+                    <button onClick={saveRates} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-2 rounded-lg">Save rates</button>
+                  </div>
+                )}
               </div>
-              <button onClick={() => setData((d) => ({ ...d, tanks: [...d.tanks, { id: uid(), name: `Tank ${d.tanks.length + 1}`, fuel: d.fuels[0]?.id || 'ms', dip: '', ltr: '' }] }))}
-                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add tank</button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[480px]">
-                <thead>
-                  <tr>{['Tank', 'Fuel', 'Dip reading (mm)', 'Ltr stock', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                  {data.tanks.map((t) => (
-                    <tr key={t.id}>
-                      <td className={tdCls}><input className={inputCls} value={t.name} onChange={(e) => setTank(t.id, { name: e.target.value })} /></td>
-                      <td className={tdCls}>
-                        <select className={inputCls} value={t.fuel} onChange={(e) => setTank(t.id, { fuel: e.target.value })}>{fuelOptions}</select>
-                      </td>
-                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.dip} onChange={(e) => setTank(t.id, { dip: e.target.value })} /></td>
-                      <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.ltr} onChange={(e) => setTank(t.id, { ltr: e.target.value })} /></td>
-                      <td className={tdCls}>
-                        <button onClick={() => setData((d) => ({ ...d, tanks: d.tanks.filter((x) => x.id !== t.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+
+            {/* Tanks */}
+            <div className={cardCls}>
+              <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Tank Stock</h2>
+                  <p className="text-[11px] text-slate-500">Rename a tank (e.g. "Tank 1 MS") and pick its fuel.</p>
+                </div>
+                <button onClick={() => setData((d) => ({ ...d, tanks: [...d.tanks, { id: uid(), name: `Tank ${d.tanks.length + 1}`, fuel: d.fuels[0]?.id || 'ms', dip: '', ltr: '' }] }))}
+                  className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"><Plus size={13} /> Add tank</button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[480px]">
+                  <thead>
+                    <tr>{['Tank', 'Fuel', 'Dip reading (ft)', 'Ltr stock', ''].map((h, i) => <th key={i} className={thCls}>{h}</th>)}</tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                    {data.tanks.map((t) => (
+                      <tr key={t.id}>
+                        <td className={tdCls}><input className={inputCls} value={t.name} onChange={(e) => setTank(t.id, { name: e.target.value })} /></td>
+                        <td className={tdCls}>
+                          <select className={inputCls} value={t.fuel} onChange={(e) => setTank(t.id, { fuel: e.target.value })}>{fuelOptions}</select>
+                        </td>
+                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.dip} onChange={(e) => setTank(t.id, { dip: e.target.value })} /></td>
+                        <td className={tdCls}><input type="number" step="0.01" className={inputCls} value={t.ltr} onChange={(e) => setTank(t.id, { ltr: e.target.value })} /></td>
+                        <td className={tdCls}>
+                          <button onClick={() => setData((d) => ({ ...d, tanks: d.tanks.filter((x) => x.id !== t.id) }))} className="text-slate-400 hover:text-red-600"><Trash2 size={14} /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
 
           </>)}
 
@@ -1029,14 +1092,14 @@ export default function DailyReportPage() {
                   className={inputCls + ' w-44'} />
               </div>
             )}
-          <div className="flex rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
-            {PERIODS.map((p) => (
-              <button key={p.id} onClick={() => setPeriod(p.id)}
-                className={'px-3 py-1.5 text-xs font-semibold ' + (period === p.id ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700')}>
-                {p.label}
-              </button>
-            ))}
-          </div>
+            <div className="flex rounded-lg border border-slate-200 dark:border-slate-600 overflow-hidden">
+              {PERIODS.map((p) => (
+                <button key={p.id} onClick={() => setPeriod(p.id)}
+                  className={'px-3 py-1.5 text-xs font-semibold ' + (period === p.id ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700')}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         {historyLoading ? (
@@ -1044,55 +1107,55 @@ export default function DailyReportPage() {
         ) : (
           <div className="space-y-6">
             {isAll ? (<>
-            <div>
-              <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue, cash and expenses</p>
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
-                  <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
-                  <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {combinedSeries.map((s) => (
-                    <Bar key={s.key} dataKey={s.key} name={s.name} fill={s.color} radius={[3, 3, 0, 0]} maxBarSize={24} />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-            {!isHospitalSingle && (
-            <div className="grid grid-cols-1 gap-6">
               <div>
-                <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue by fuel (₹)</p>
-                <ResponsiveContainer width="100%" height={260}>
+                <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue, cash and expenses</p>
+                <ResponsiveContainer width="100%" height={300}>
                   <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
                     <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
                     <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {fuelNames.map((n, i) => (
-                      <Bar key={`rev${i}`} dataKey={`rev${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={20} />
+                    {combinedSeries.map((s) => (
+                      <Bar key={s.key} dataKey={s.key} name={s.name} fill={s.color} radius={[3, 3, 0, 0]} maxBarSize={24} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-              <div>
-                <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Litres sold by fuel (L)</p>
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
-                    <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                    <Tooltip formatter={(v: number) => `${fmtNum(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {fuelNames.map((n, i) => (
-                      <Bar key={`lit${i}`} dataKey={`lit${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={20} />
-                    ))}
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-            )}
+              {!isHospitalSingle && (
+                <div className="grid grid-cols-1 gap-6">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Revenue by fuel (₹)</p>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(0) + 'k' : v}`} />
+                        <Tooltip formatter={(v: number) => fmtMoney(v)} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        {fuelNames.map((n, i) => (
+                          <Bar key={`rev${i}`} dataKey={`rev${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={20} />
+                        ))}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Litres sold by fuel (L)</p>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={trendRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={0} barCategoryGap="15%">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} interval={xInterval} angle={-45} textAnchor="end" height={64} />
+                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                        <Tooltip formatter={(v: number) => `${fmtNum(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        {fuelNames.map((n, i) => (
+                          <Bar key={`lit${i}`} dataKey={`lit${i}`} name={n} fill={COLORS[i % COLORS.length]} radius={[3, 3, 0, 0]} maxBarSize={20} />
+                        ))}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
             </>) : (<>
               {isHospitalSingle ? (<>
                 <div>

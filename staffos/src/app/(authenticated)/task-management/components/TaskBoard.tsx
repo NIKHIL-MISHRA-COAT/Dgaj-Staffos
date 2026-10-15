@@ -301,7 +301,65 @@ export default function TaskBoard() {
   const [myRecurringInstances, setMyRecurringInstances] = useState<any[]>([]);
   const [recurringInstancesLoading, setRecurringInstancesLoading] = useState(false);
   const { user, pinSession, effectiveUserId } = useAuth();
+  // Subsidiaries the user can see, offered alongside clients in the task client picker.
+  // Loaded directly here (visibility rule, then subsidiary firms only).
+  const [visibleSubs, setVisibleSubs] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!effectiveUserId) return;
+    (async () => {
+      const { data: ids, error: rpcErr } = await createClient().rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' });
+      if (rpcErr) { console.warn('Visible firms failed:', rpcErr.message); return; }
+      if (!ids || ids.length === 0) { setVisibleSubs([]); return; }
+      const { data, error } = await createClient()
+        .from('firms')
+        .select('id, name')
+        .in('id', ids as string[])
+        .eq('firm_type', 'subsidiary')
+        .order('name', { ascending: true });
+      if (error) { console.warn('Subsidiary load failed:', error.message); return; }
+      setVisibleSubs((data as { id: string; name: string }[]) || []);
+    })();
+  }, [effectiveUserId]);
   const { language } = useLanguage();
+
+  // ── Client + subsidiary picker (shared by filter, create, edit and copy) ──
+  // Values: "client:<id>" = client, "firm:<id>" = subsidiary, "none" = Internal (filter only),
+  // "text:<name>" = older free-text value, "" = nothing chosen.
+  const subNameSet = visibleSubs.map((f) => f.name);
+  const subById = (id: string) => visibleSubs.find((f) => f.id === id);
+  const pickRef = (clientOrgId?: string | null, orgName?: string | null) => {
+    if (clientOrgId) return `client:${clientOrgId}`;
+    if (!orgName) return '';
+    const sub = visibleSubs.find((f) => f.name === orgName);
+    return sub ? `firm:${sub.id}` : `text:${orgName}`;
+  };
+  const applyPick = (v: string) => {
+    if (v.startsWith('client:')) {
+      const org = clientOrgs.find((o) => o.id === v.slice(7));
+      return { clientOrgId: org?.id || '', clientOrgName: org?.name || null, organisationRelatesTo: org?.name || '' };
+    }
+    if (v.startsWith('firm:')) {
+      const f = subById(v.slice(5));
+      return { clientOrgId: '', clientOrgName: null, organisationRelatesTo: f?.name || '' };
+    }
+    if (v.startsWith('text:')) return { clientOrgId: '', clientOrgName: null, organisationRelatesTo: v.slice(5) };
+    return { clientOrgId: '', clientOrgName: null, organisationRelatesTo: '' };
+  };
+  const pickerOptions = (includeInternal: boolean) => (
+    <>
+      {includeInternal && <option value="">— {language === 'hi' ? 'कोई नहीं (आंतरिक)' : 'None (Internal)'} —</option>}
+      {visibleSubs.length > 0 && (
+        <optgroup label={language === 'hi' ? 'सहायक कंपनियां' : 'Subsidiaries'}>
+          {visibleSubs.map((f) => <option key={`firm:${f.id}`} value={`firm:${f.id}`}>{f.name}</option>)}
+        </optgroup>
+      )}
+      {clientOrgs.length > 0 && (
+        <optgroup label={language === 'hi' ? 'क्लाइंट' : 'Clients'}>
+          {clientOrgs.map((o) => <option key={`client:${o.id}`} value={`client:${o.id}`}>{o.name}</option>)}
+        </optgroup>
+      )}
+    </>
+  );
   const supabase = createClient();
   const subscriptionsRef = useRef<any[]>([]);
 
@@ -828,6 +886,8 @@ export default function TaskBoard() {
         is_template: false,
         task_category: editingTask.task_category || 'general',
         organisation_relates_to: editingTask.organisation_relates_to?.trim() || null,
+        client_org_id: editingTask.client_org_id || null,
+        client_org_name: editingTask.client_org_name || null,
       };
       const { error } = await supabase.from('tasks').update(updateData).eq('id', editingTask.id);
       if (error) throw error;
@@ -943,12 +1003,12 @@ export default function TaskBoard() {
   };
 
   const handleCopyToClient = async () => {
-    if (!copyToClientTask || !copyTargetOrgId) { toast.error('Please select a client organisation'); return; }
+    if (!copyToClientTask || !copyTargetOrgId) { toast.error('Please select a client or subsidiary'); return; }
     const uid = effectiveUserId;
     if (!uid) return;
     setCopyingTask(true);
     try {
-      const targetOrg = clientOrgs.find((o) => o.id === copyTargetOrgId);
+      const copyPick = applyPick(copyTargetOrgId);
       const copiedChecklist = copyToClientTask.checklist.map((item) => ({
         ...item,
         id: `cl-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -976,8 +1036,9 @@ export default function TaskBoard() {
         notify_before_minutes: copyToClientTask.notify_before_minutes || 30,
         is_template: false,
         task_category: copyToClientTask.task_category || 'general',
-        client_org_id: copyTargetOrgId,
-        client_org_name: targetOrg?.name || null,
+        client_org_id: copyPick.clientOrgId || null,
+        client_org_name: copyPick.clientOrgName,
+        organisation_relates_to: copyPick.organisationRelatesTo || null,
       };
 
             const { data, error } = await supabase.from('tasks').insert(taskData).select().single();
@@ -1255,7 +1316,13 @@ export default function TaskBoard() {
     const matchDept = deptFilter === 'all' || t.assigned_to_dept === deptFilter || t.assigned_by_dept === deptFilter;
     const matchSearch = !searchQuery || t.title.toLowerCase().includes(searchQuery.toLowerCase()) || t.assigned_to_name.toLowerCase().includes(searchQuery.toLowerCase());
     const matchCategory = categoryFilter === 'all' || t.task_category === categoryFilter;
-    const matchClient = clientFilter === 'all' || (clientFilter === 'none' ? !t.client_org_id : t.client_org_id === clientFilter);
+    const matchClient = clientFilter === 'all'
+      ? true
+      : clientFilter === 'none'
+        ? !t.client_org_id && !subNameSet.includes(t.organisation_relates_to || '')
+        : clientFilter.startsWith('client:')
+          ? t.client_org_id === clientFilter.slice(7)
+          : !t.client_org_id && t.organisation_relates_to === subById(clientFilter.slice(5))?.name;
     const matchPriority = priorityFilter === 'all' || t.priority === priorityFilter;
     const matchAssignedUser = assignedUserFilter === 'all' || (t.assigned_user_ids || []).includes(assignedUserFilter) || t.assigned_to_user_id === assignedUserFilter || t.assigned_to === assignedUserFilter;
     const matchDate = !dateFilter || t.due_date === dateFilter;
@@ -1510,7 +1577,7 @@ export default function TaskBoard() {
                   className="input-field pl-7 pr-7 py-2 text-xs appearance-none cursor-pointer w-full">
                   <option value="all">{language === 'hi' ? 'सभी क्लाइंट' : 'All Clients'}</option>
                   <option value="none">{language === 'hi' ? 'केवल आंतरिक' : 'Internal Only'}</option>
-                  {clientOrgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  {pickerOptions(false)}
                 </select>
                 <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
               </div>
@@ -1614,7 +1681,9 @@ export default function TaskBoard() {
               )}
               {clientFilter !== 'all' && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-600 bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded-full">
-                  Client: {clientFilter === 'none' ? 'Internal Only' : clientOrgs.find((o) => o.id === clientFilter)?.name || clientFilter}
+                  Client: {clientFilter === 'none' ? 'Internal Only'
+                    : clientFilter.startsWith('client:') ? (clientOrgs.find((o) => o.id === clientFilter.slice(7))?.name || clientFilter)
+                    : (subById(clientFilter.slice(5))?.name || clientFilter)}
                   <button onClick={() => setClientFilter('all')} className="hover:text-red-500"><X size={10} /></button>
                 </span>
               )}
@@ -2377,10 +2446,8 @@ export default function TaskBoard() {
                     onChange={(e) => setCopyTargetOrgId(e.target.value)}
                     className="input-field pl-8 appearance-none cursor-pointer"
                   >
-                    <option value="">— {language === 'hi' ? 'संगठन चुनें' : 'Select organisation'} —</option>
-                    {clientOrgs.map((o) => (
-                      <option key={o.id} value={o.id}>{o.name}</option>
-                    ))}
+                    <option value="">— {language === 'hi' ? 'संगठन चुनें' : 'Select client or subsidiary'} —</option>
+                    {pickerOptions(false)}
                   </select>
                   <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 </div>
@@ -2401,6 +2468,7 @@ export default function TaskBoard() {
       {/* Client Organisations Modal */}
       {showClientOrgs && (
         <ClientOrganisations
+          canManage={userRole === 'director' || userRole === 'manager'}
           onClose={() => setShowClientOrgs(false)}
           onOrgAdded={() => {
             supabase.from('client_organisations').select('id, name').order('name').then(({ data }) => {
@@ -2518,17 +2586,14 @@ export default function TaskBoard() {
                 <div className="relative">
                   <Building2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <select
-                    value={newTask.clientOrgId}
+                    value={pickRef(newTask.clientOrgId, newTask.organisationRelatesTo)}
                     onChange={(e) => {
-                      const org = clientOrgs.find(o => o.id === e.target.value);
-                      setNewTask({ ...newTask, clientOrgId: e.target.value, organisationRelatesTo: org?.name || '' });
+                      const r = applyPick(e.target.value);
+                      setNewTask({ ...newTask, clientOrgId: r.clientOrgId, organisationRelatesTo: r.organisationRelatesTo });
                     }}
                     className="input-field pl-8 appearance-none cursor-pointer"
                   >
-                    <option value="">— {language === 'hi' ? 'कोई नहीं (आंतरिक)' : 'None (Internal)'} —</option>
-                    {clientOrgs.map((o) => (
-                      <option key={o.id} value={o.id}>{o.name}</option>
-                    ))}
+                    {pickerOptions(true)}
                   </select>
                   <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 </div>
@@ -2734,14 +2799,19 @@ export default function TaskBoard() {
                 <div className="relative">
                   <Building2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <select
-                    value={editingTask.organisation_relates_to || ''}
-                    onChange={(e) => setEditingTask({ ...editingTask, organisation_relates_to: e.target.value })}
+                    value={pickRef(editingTask.client_org_id, editingTask.organisation_relates_to)}
+                    onChange={(e) => {
+                      const r = applyPick(e.target.value);
+                      setEditingTask({
+                        ...editingTask,
+                        client_org_id: r.clientOrgId || null,
+                        client_org_name: r.clientOrgName,
+                        organisation_relates_to: r.organisationRelatesTo || null,
+                      });
+                    }}
                     className="input-field pl-8 appearance-none cursor-pointer"
                   >
-                    <option value="">— {language === 'hi' ? 'कोई नहीं (आंतरिक)' : 'None (Internal)'} —</option>
-                    {clientOrgs.map((o) => (
-                      <option key={o.id} value={o.name}>{o.name}</option>
-                    ))}
+                    {pickerOptions(true)}
                   </select>
                   <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 </div>

@@ -8,6 +8,7 @@ export interface VisibleFirm {
   id: string;
   name: string;
   code: string;
+  firm_type?: string;
 }
 
 /**
@@ -43,7 +44,7 @@ export function useVisibleFirms() {
 
     const { data } = await supabase
       .from('firms')
-      .select('id, name, code')
+      .select('id, name, code, firm_type')
       .in('id', visibleIds)
       .order('name');
 

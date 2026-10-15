@@ -58,6 +58,7 @@ const DISCREPANCY_TYPES = ['Billing Error', 'Data Mismatch', 'Service Issue', 'C
 const defaultForm = {
   client_name: '',
   client_org_id: '',
+  subsidiary_firm_id: '',
   discrepancy_type: 'Billing Error',
   title: '',
   description: '',
@@ -73,6 +74,7 @@ export default function ClientDiscrepancyReports() {
   const [userRole, setUserRole] = useState('employee');
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
   const [clientOrgs, setClientOrgs] = useState<ClientOrg[]>([]);
+  const [subsidiaries, setSubsidiaries] = useState<{ id: string; name: string }[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(defaultForm);
   const [submitting, setSubmitting] = useState(false);
@@ -111,6 +113,15 @@ export default function ClientDiscrepancyReports() {
       setReports((reportsRes.data || []) as DiscrepancyReport[]);
       setClientOrgs(orgsRes.data || []);
       setAllUsers(usersRes.data || []);
+      // Client = client organisations + subsidiary companies (firms)
+      const subIds = (visibleFirmIds as string[] | null) || [];
+      if (subIds.length > 0) {
+        const { data: subs } = await supabase.from('firms').select('id, name')
+          .in('id', subIds).eq('firm_type', 'subsidiary').order('name');
+        setSubsidiaries(subs || []);
+      } else {
+        setSubsidiaries([]);
+      }
     } catch (err: any) {
       toast.error('Failed to load reports');
     } finally {
@@ -124,20 +135,23 @@ export default function ClientDiscrepancyReports() {
     if (!form.title.trim() || !form.description.trim()) {
       toast.error('Please fill in title and description'); return;
     }
-    if (!form.client_name.trim() && !form.client_org_id) {
-      toast.error('Please specify a client name or select a client organisation'); return;
+    if (!form.client_name.trim() && !form.client_org_id && !form.subsidiary_firm_id) {
+      toast.error('Please specify a client name or select a client or subsidiary'); return;
     }
     if (!effectiveUserId) return;
     setSubmitting(true);
     try {
       const clientName = form.client_org_id
         ? (clientOrgs.find(o => o.id === form.client_org_id)?.name || form.client_name)
-        : form.client_name;
+        : form.subsidiary_firm_id
+          ? (subsidiaries.find(f => f.id === form.subsidiary_firm_id)?.name || form.client_name)
+          : form.client_name;
       const { data: reporterProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).single();
       const { error } = await supabase.from('client_discrepancy_reports').insert({
         reported_by: effectiveUserId,
         firm_id: reporterProfile?.firm_id || null,
         client_org_id: form.client_org_id || null,
+        subsidiary_firm_id: form.subsidiary_firm_id || null,
         client_name: clientName,
         discrepancy_type: form.discrepancy_type,
         title: form.title,
@@ -356,13 +370,29 @@ export default function ClientDiscrepancyReports() {
             <div className="px-6 py-5 space-y-4">
               <div>
                 <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Client Organisation</label>
-                <select value={form.client_org_id} onChange={e => setForm(f => ({ ...f, client_org_id: e.target.value, client_name: e.target.value ? '' : f.client_name }))}
+                <select
+                  value={form.client_org_id ? `client:${form.client_org_id}` : form.subsidiary_firm_id ? `firm:${form.subsidiary_firm_id}` : ''}
+                  onChange={e => {
+                    const v = e.target.value;
+                    if (v.startsWith('client:')) setForm(f => ({ ...f, client_org_id: v.slice(7), subsidiary_firm_id: '', client_name: '' }));
+                    else if (v.startsWith('firm:')) setForm(f => ({ ...f, client_org_id: '', subsidiary_firm_id: v.slice(5), client_name: '' }));
+                    else setForm(f => ({ ...f, client_org_id: '', subsidiary_firm_id: '' }));
+                  }}
                   className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-orange-300 text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-700">
                   <option value="">— Select or type below —</option>
-                  {clientOrgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  {subsidiaries.length > 0 && (
+                    <optgroup label="Subsidiaries">
+                      {subsidiaries.map(f => <option key={`firm:${f.id}`} value={`firm:${f.id}`}>{f.name}</option>)}
+                    </optgroup>
+                  )}
+                  {clientOrgs.length > 0 && (
+                    <optgroup label="Clients">
+                      {clientOrgs.map(o => <option key={`client:${o.id}`} value={`client:${o.id}`}>{o.name}</option>)}
+                    </optgroup>
+                  )}
                 </select>
               </div>
-              {!form.client_org_id && (
+              {!form.client_org_id && !form.subsidiary_firm_id && (
                 <div>
                   <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Client Name *</label>
                   <input value={form.client_name} onChange={e => setForm(f => ({ ...f, client_name: e.target.value }))}

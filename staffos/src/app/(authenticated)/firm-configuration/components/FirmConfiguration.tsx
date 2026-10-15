@@ -95,6 +95,9 @@ const defaultLocationRadius: LocationRadiusConfig = {
 
 type SectionId = 'working_hours' | 'leave' | 'holidays' | 'location' | 'financial_year' | 'payroll' | 'firms';
 
+const GST_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+
 interface Firm {
   id: string;
   name: string;
@@ -110,6 +113,11 @@ interface Firm {
   radius_meters?: number | null;
   enforce_radius?: boolean | null;
   block_clock_in?: boolean | null;
+  gst_number?: string | null;
+  pan_number?: string | null;
+  address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
 }
 
 interface FirmSharing {
@@ -223,7 +231,7 @@ export default function FirmConfiguration() {
   const [firms, setFirms] = useState<Firm[]>([]);
   const [salarySchedule, setSalarySchedule] = useState({ day_of_month: 1, label: 'Salary Day' });
   const [sharingRules, setSharingRules] = useState<FirmSharing[]>([]);
-  const [newFirm, setNewFirm] = useState({ name: '', code: '', firm_type: 'subsidiary' as Firm['firm_type'], parent_firm_id: '', weekly_off_days: [0] as number[] });
+  const [newFirm, setNewFirm] = useState({ name: '', code: '', firm_type: 'subsidiary' as Firm['firm_type'], parent_firm_id: '', weekly_off_days: [0] as number[], gst_number: '', pan_number: '', address: '', contact_person: '', contact_phone: '' });
   const [editingFirmId, setEditingFirmId] = useState<string | null>(null);
   const [newSharing, setNewSharing] = useState({ source_firm_id: '', target_firm_id: '', module: 'tasks' });
   const [firmsLoading, setFirmsLoading] = useState(false);
@@ -245,12 +253,12 @@ export default function FirmConfiguration() {
 
   const startEditFirm = (f: Firm) => {
     setEditingFirmId(f.id);
-    setNewFirm({ name: f.name, code: f.code, firm_type: f.firm_type, parent_firm_id: f.parent_firm_id || '', weekly_off_days: f.settings?.weekly_off_days || [0] });
+    setNewFirm({ name: f.name, code: f.code, firm_type: f.firm_type, parent_firm_id: f.parent_firm_id || '', weekly_off_days: f.settings?.weekly_off_days || [0], gst_number: f.gst_number || '', pan_number: f.pan_number || '', address: f.address || '', contact_person: f.contact_person || '', contact_phone: f.contact_phone || '' });
   };
 
   const cancelEditFirm = () => {
     setEditingFirmId(null);
-    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '', weekly_off_days: [0] });
+    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '', weekly_off_days: [0], gst_number: '', pan_number: '', address: '', contact_person: '', contact_phone: '' });
   };
 
   const toggleWeeklyOffDay = (day: number) => {
@@ -267,6 +275,18 @@ export default function FirmConfiguration() {
       toast.error('Firm name and code are required');
       return;
     }
+    // Company details are optional, but must be in the right format when filled.
+    const gst = newFirm.gst_number.trim().toUpperCase();
+    const pan = newFirm.pan_number.trim().toUpperCase();
+    if (gst && !GST_RE.test(gst)) { toast.error('GST number is not in a valid format (15 characters)'); return; }
+    if (pan && !PAN_RE.test(pan)) { toast.error('PAN is not in a valid format (10 characters)'); return; }
+    const details = {
+      gst_number: gst || null,
+      pan_number: pan || null,
+      address: newFirm.address.trim() || null,
+      contact_person: newFirm.contact_person.trim() || null,
+      contact_phone: newFirm.contact_phone.trim() || null,
+    };
 
     if (editingFirmId) {
       const { error } = await supabase.from('firms').update({
@@ -275,6 +295,7 @@ export default function FirmConfiguration() {
         firm_type: newFirm.firm_type,
         parent_firm_id: newFirm.parent_firm_id || null,
         settings: { weekly_off_days: newFirm.weekly_off_days },
+        ...details,
       }).eq('id', editingFirmId);
       if (error) { toast.error(error.message || 'Failed to update firm — code may already be in use'); return; }
       toast.success('Firm updated');
@@ -289,10 +310,11 @@ export default function FirmConfiguration() {
       firm_type: newFirm.firm_type,
       parent_firm_id: newFirm.parent_firm_id || null,
       settings: { weekly_off_days: newFirm.weekly_off_days },
+      ...details,
     });
     if (error) { toast.error(error.message || 'Failed to create firm — code may already be in use'); return; }
     toast.success('Firm added');
-    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '', weekly_off_days: [0] });
+    setNewFirm({ name: '', code: '', firm_type: 'subsidiary', parent_firm_id: '', weekly_off_days: [0], gst_number: '', pan_number: '', address: '', contact_person: '', contact_phone: '' });
     fetchFirms();
   };
 
@@ -961,7 +983,7 @@ export default function FirmConfiguration() {
                                   <div className="flex-1 min-w-0">
                                     <p className="text-sm font-semibold text-slate-800">{f.name} <span className="text-xs font-normal text-slate-400">({f.code})</span></p>
                                     <p className="text-xs text-slate-500">
-                                      {f.firm_type}{f.parent_firm_id ? ` · under ${firmName(f.parent_firm_id)}` : ''}
+                                      {f.firm_type === 'parent' ? 'PARENT FIRM' : f.firm_type === 'subsidiary' ? 'SUBSIDIARY' : f.firm_type.toUpperCase()}{f.parent_firm_id ? ` · under ${firmName(f.parent_firm_id)}` : ''}
                                     </p>
                                   </div>
                                   <button onClick={() => startEditFirm(f)} className="text-xs font-semibold px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 flex items-center gap-1">
@@ -990,16 +1012,34 @@ export default function FirmConfiguration() {
                                 className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
                               <select value={newFirm.firm_type} onChange={(e) => setNewFirm({ ...newFirm, firm_type: e.target.value as Firm['firm_type'] })}
                                 className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
-                                <option value="holding">Holding company</option>
                                 <option value="parent">Parent firm</option>
                                 <option value="subsidiary">Subsidiary</option>
-                                <option value="branch">Branch</option>
                               </select>
                               <select value={newFirm.parent_firm_id} onChange={(e) => setNewFirm({ ...newFirm, parent_firm_id: e.target.value })}
                                 className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
                                 <option value="">No parent firm</option>
                                 {firms.filter((f) => f.id !== editingFirmId).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
                               </select>
+                            </div>
+                            <div className="space-y-2">
+                              <p className="text-xs font-semibold text-slate-600">Company details (optional)</p>
+                              <div className="grid grid-cols-2 gap-3">
+                                <input placeholder="GST number" maxLength={15} value={newFirm.gst_number}
+                                  onChange={(e) => setNewFirm({ ...newFirm, gst_number: e.target.value.toUpperCase() })}
+                                  className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
+                                <input placeholder="PAN" maxLength={10} value={newFirm.pan_number}
+                                  onChange={(e) => setNewFirm({ ...newFirm, pan_number: e.target.value.toUpperCase() })}
+                                  className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
+                                <input placeholder="Contact person" value={newFirm.contact_person}
+                                  onChange={(e) => setNewFirm({ ...newFirm, contact_person: e.target.value })}
+                                  className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
+                                <input placeholder="Contact number" value={newFirm.contact_phone}
+                                  onChange={(e) => setNewFirm({ ...newFirm, contact_phone: e.target.value })}
+                                  className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
+                              </div>
+                              <textarea placeholder="Address" rows={2} value={newFirm.address}
+                                onChange={(e) => setNewFirm({ ...newFirm, address: e.target.value })}
+                                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white resize-none" />
                             </div>
                             <div>
                               <label className="text-xs font-semibold text-slate-600 mb-1.5 block">Weekly off day(s) — used for attendance and payroll</label>

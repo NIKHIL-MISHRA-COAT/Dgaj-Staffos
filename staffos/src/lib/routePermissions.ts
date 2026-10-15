@@ -20,6 +20,11 @@ export const DIRECTOR_ONLY_ROUTES = [
   '/audit-log',
 ];
 
+// Directors and managers only (executives can read clients but not manage them).
+export const DIRECTOR_OR_MANAGER_ROUTES = [
+  '/clients',
+];
+
 export const MANAGER_PLUS_ROUTES = [
   '/user-management',
   '/attendance-audit',
@@ -32,6 +37,9 @@ export function isRoleAllowed(pathname: string, role: string | null | undefined)
   const r = role || 'employee';
   if (DIRECTOR_ONLY_ROUTES.some((p) => pathname.startsWith(p))) {
     return r === 'director';
+  }
+  if (DIRECTOR_OR_MANAGER_ROUTES.some((p) => pathname.startsWith(p))) {
+    return r === 'director' || r === 'manager';
   }
   if (MANAGER_PLUS_ROUTES.some((p) => pathname.startsWith(p))) {
     return r === 'director' || r === 'manager' || r === 'executive';

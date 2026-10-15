@@ -9,7 +9,7 @@ import {
   Shield, Download, Smartphone, Palmtree, Ticket, Receipt, Command,
   Navigation, ClipboardList, Building2, SlidersHorizontal,
   AlertTriangle, ScrollText, BookMarked, LogOut, ChevronRight,
-  CheckSquare, ListTodo, Repeat, PieChart
+  CheckSquare, ListTodo, Repeat, PieChart, Briefcase
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -34,6 +34,7 @@ const navItems: NavItem[] = [
   { id: 'nav-payroll', label: 'Payroll', icon: Wallet, href: '/payroll', group: 'core' },
   { id: 'nav-profile', label: 'My Profile', icon: UserCircle, href: '/employee-profile', group: 'core' },
   { id: 'nav-my-tasks', label: 'My Tasks', icon: ListTodo, href: '/my-tasks', group: 'tasks' },
+  { id: 'nav-task-management', label: 'Task Management', icon: ListTodo, href: '/task-management', group: 'tasks' },
   { id: 'nav-all-tasks', label: 'All Tasks', icon: CheckSquare, href: '/all-tasks', group: 'tasks' },
   { id: 'nav-recurring-tasks', label: 'Recurring Tasks', icon: Repeat, href: '/recurring-tasks', group: 'tasks' },
   { id: 'nav-task-analytics', label: 'Task Analytics', icon: PieChart, href: '/task-analytics', group: 'tasks' },
@@ -41,6 +42,7 @@ const navItems: NavItem[] = [
   { id: 'nav-tickets', label: 'Ticket Centre', icon: Ticket, href: '/ticket-centre', group: 'collaborate' },
   { id: 'nav-expenses', label: 'Expense Centre', icon: Receipt, href: '/expense-centre', group: 'collaborate' },
   { id: 'nav-discrepancy', label: 'Client Discrepancies', icon: AlertTriangle, href: '/client-discrepancy-reports', group: 'collaborate' },
+  { id: 'nav-clients', label: 'Clients', icon: Briefcase, href: '/clients', group: 'collaborate' },
   { id: 'nav-chat', label: 'Chat', icon: MessageSquare, href: '/chat', group: 'collaborate' },
   { id: 'nav-docs', label: 'Documents', icon: BookOpen, href: '/documents', group: 'resources' },
   { id: 'nav-analytics', label: 'Analytics', icon: BarChart3, href: '/analytics-reporting-dashboard', group: 'management' },
@@ -160,6 +162,8 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
       'nav-profile': t('myProfile'),
       'nav-my-tasks': t('myTasks'),
       'nav-all-tasks': t('allTasks'),
+      'nav-task-management': 'Task Management',
+      'nav-clients': 'Clients',
       'nav-recurring-tasks': t('recurringTasks'),
       'nav-task-analytics': t('taskAnalytics'),
       'nav-calendar': t('calendar'),
@@ -187,6 +191,7 @@ export default function MobileMenu({ isOpen, activePath, onClose }: MobileMenuPr
   const filteredNavItems = navItems.filter((item) => {
     const mgmtOnly = ['nav-live-map', 'nav-audit', 'nav-leave-admin', 'nav-holidays'];
     if (mgmtOnly.includes(item.id)) return isManagerOrDirector;
+    if (['nav-task-management', 'nav-clients'].includes(item.id)) return role === 'director' || role === 'manager';
     if (item.id === 'nav-daily-report') return dailyReportAccess;
     if (['nav-analytics', 'nav-reports', 'nav-audit-log'].includes(item.id)) return role === 'director';
     return true;
