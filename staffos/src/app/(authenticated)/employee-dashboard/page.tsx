@@ -68,8 +68,9 @@ export default function EmployeeDashboardPage() {
         <KPIBentoGrid />
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 sm:gap-5 mt-4 sm:mt-5">
           <div className="xl:col-span-2 space-y-4 sm:space-y-5">
-            <WeeklyAttendanceChart />
             <TodayTasksBox />
+            <WeeklyAttendanceChart />
+            
           </div>
           <div className="space-y-4 sm:space-y-5">
             <LeaveBalancePanel />
