@@ -61,6 +61,7 @@ interface UserProfile {
   role: string;
   department: string;
   job_title?: string;
+  firm_id?: string | null;
 }
 
 interface ClientOrg {
@@ -123,6 +124,7 @@ interface NewTaskForm {
   dueDate: string;
   dueTime: string;
   assignedToDept: string;
+  firmIds: string[];
   assignedUserIds: string[];
   recurring: string;
   notifyBefore: number;
@@ -139,7 +141,7 @@ interface NewTaskForm {
 
 const defaultForm: NewTaskForm = {
   title: '', description: '', priority: 'medium', dueDate: '', dueTime: '',
-  assignedToDept: '', assignedUserIds: [], recurring: '', notifyBefore: 30, reminderTimes: [],
+  assignedToDept: '', firmIds: [], assignedUserIds: [], recurring: '', notifyBefore: 30, reminderTimes: [],
     checklistItems: [''], organisationRelatesTo: '', clientOrgId: '', taskCategory: 'general',
   helperUserIds: [], collaboratorUserIds: [], isFlagged: false, flagReason: '',
 };
@@ -304,20 +306,23 @@ export default function TaskBoard() {
   // Subsidiaries the user can see, offered alongside clients in the task client picker.
   // Loaded directly here (visibility rule, then subsidiary firms only).
   const [visibleSubs, setVisibleSubs] = useState<{ id: string; name: string }[]>([]);
+  // Every firm the user can see, for the multi-firm picker on the create form
+  const [visibleFirmList, setVisibleFirmList] = useState<{ id: string; name: string }[]>([]);
   useEffect(() => {
     if (!effectiveUserId) return;
     (async () => {
       const { data: ids, error: rpcErr } = await createClient().rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' });
       if (rpcErr) { console.warn('Visible firms failed:', rpcErr.message); return; }
-      if (!ids || ids.length === 0) { setVisibleSubs([]); return; }
+      if (!ids || ids.length === 0) { setVisibleSubs([]); setVisibleFirmList([]); return; }
       const { data, error } = await createClient()
         .from('firms')
-        .select('id, name')
+        .select('id, name, firm_type')
         .in('id', ids as string[])
-        .eq('firm_type', 'subsidiary')
         .order('name', { ascending: true });
-      if (error) { console.warn('Subsidiary load failed:', error.message); return; }
-      setVisibleSubs((data as { id: string; name: string }[]) || []);
+      if (error) { console.warn('Firm load failed:', error.message); return; }
+      const all = (data || []) as { id: string; name: string; firm_type: string }[];
+      setVisibleFirmList(all.map(({ id, name }) => ({ id, name })));
+      setVisibleSubs(all.filter((f) => f.firm_type === 'subsidiary').map(({ id, name }) => ({ id, name })));
     })();
   }, [effectiveUserId]);
   const { language } = useLanguage();
@@ -505,7 +510,7 @@ export default function TaskBoard() {
           .single(),
         supabase
           .from('user_profiles')
-          .select('id, full_name, role, department, job_title')
+          .select('id, full_name, role, department, job_title, firm_id')
           .order('full_name', { ascending: true }),
         supabase
           .from('client_organisations')
@@ -521,8 +526,10 @@ export default function TaskBoard() {
       // plus any firm that's explicitly shared tasks with you via
       // firm_data_sharing) — not just tasks you personally created/are
       // assigned to/collaborate on.
-      if (visibleFirmIds) {
-        tasksQuery = tasksQuery.in('firm_id', visibleFirmIds);
+      // A task shows if its primary firm OR any of its firms (firm_ids) is visible to you
+      if (visibleFirmIds && (visibleFirmIds as string[]).length > 0) {
+        const fl = (visibleFirmIds as string[]).join(',');
+        tasksQuery = tasksQuery.or(`firm_id.in.(${fl}),firm_ids.ov.{${fl}}`);
       }
 
       const tasksRes = await tasksQuery;
@@ -808,6 +815,9 @@ export default function TaskBoard() {
         assigned_to_name: assignedNames || 'Unassigned',
         assigned_to_dept: primaryUser?.department || newTask.assignedToDept || 'General',
         assigned_user_ids: newTask.assignedUserIds,
+        // First firm picked is the primary firm; every picked firm is kept in firm_ids
+        firm_id: newTask.firmIds[0] || null,
+        firm_ids: newTask.firmIds.length ? newTask.firmIds : null,
         assigned_by: uid,
         created_by: uid,
         assigned_by_name: userName,
@@ -2554,13 +2564,55 @@ export default function TaskBoard() {
                 </div>
               </div>
 
+              {/* Firms: one or more; the people list below shows members of the picked firms */}
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">
+                  Firms <span className="text-slate-400 font-400">({language === 'hi' ? 'एक या अधिक चुनें' : 'select one or more'})</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {visibleFirmList.map((fm) => {
+                    const on = newTask.firmIds.includes(fm.id);
+                    return (
+                      <button
+                        key={fm.id}
+                        type="button"
+                        onClick={() => setNewTask((p) => {
+                          const firmIds = p.firmIds.includes(fm.id)
+                            ? p.firmIds.filter((x) => x !== fm.id)
+                            : [...p.firmIds, fm.id];
+                          // Drop anyone whose firm is no longer picked
+                          return {
+                            ...p,
+                            firmIds,
+                            assignedUserIds: p.assignedUserIds.filter((id) => {
+                              const firmOfUser = allUsers.find((u) => u.id === id)?.firm_id;
+                              return firmIds.length === 0 || (!!firmOfUser && firmIds.includes(firmOfUser));
+                            }),
+                          };
+                        })}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                          on
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                        }`}
+                      >
+                        {fm.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  {newTask.firmIds.length === 0 ? 'No firm picked: people from all firms are shown' : `${newTask.firmIds.length} firm${newTask.firmIds.length > 1 ? 's' : ''} selected`}
+                </p>
+              </div>
+
               {/* Multi-user assignment */}
               <div>
                 <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">
                   <Users size={12} className="inline mr-1" />{language === 'hi' ? 'उपयोगकर्ताओं को सौंपें' : 'Assign to Users'} <span className="text-slate-400 font-400">({language === 'hi' ? 'एक या अधिक चुनें' : 'select one or more'})</span>
                 </label>
                 <UserMultiSelect
-                  allUsers={allUsers}
+                  allUsers={allUsers.filter((u) => newTask.firmIds.length === 0 || (!!u.firm_id && newTask.firmIds.includes(u.firm_id)))}
                   selectedIds={newTask.assignedUserIds}
                   onChange={(ids) => setNewTask({ ...newTask, assignedUserIds: ids })}
                   roleGroups={roleGroups}

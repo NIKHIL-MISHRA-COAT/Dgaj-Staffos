@@ -815,6 +815,7 @@ interface Row {
   invite: boolean; // someone asked me to join this task; I can accept or decline
   collabs: { name: string; status: string }[]; // other people attached to the task (accepted or requested)
   firm_id: string | null;
+  firm_ids: string[] | null; // every firm the task belongs to (firm_id is the primary one)
 }
 
 interface UserProfile { id: string; full_name: string; role: string; department: string | null; firm_id?: string | null; }
@@ -870,7 +871,7 @@ const SECTIONS: { key: Bucket; label: string; icon: any; head: string; badge: st
 const TASK_COLS = `id, title, description, task_status, status, priority, category_id, task_category,
   assigned_to, assigned_to_user_id, assigned_to_name, assigned_user_ids, assigned_by_name, creator_id,
   client_org_id, client_org_name, organisation_relates_to, due_date, due_time, estimated_hours,
-  completion_percentage, is_recurring, recurring, is_blocked, completed_at, created_at, firm_id`;
+  completion_percentage, is_recurring, recurring, is_blocked, completed_at, created_at, firm_id, firm_ids`;
 
 /* ───────────────────────── Helpers ───────────────────────── */
 
@@ -1224,7 +1225,7 @@ function CreateTaskModal({
   const [f, setF] = useState({
     title: '', description: '', priority: 'medium' as Priority, assignees: [uid] as string[],
     // Defaults to the creator's own firm. Employees stay in it; directors and managers can pick a visible firm.
-    firmId: ownFirmId || '',
+    firmIds: (ownFirmId ? [ownFirmId] : []) as string[],
     due_date: '', due_time: '', recurring: '', category_id: '',
     // Client picker value: "client:<id>" (client organisation), "firm:<id>" (subsidiary) or "" (Internal)
     pick: '',
@@ -1280,7 +1281,9 @@ function CreateTaskModal({
         assigned_to_name: picked.map(u => u.full_name).join(', ') || 'Unassigned',
         assigned_to_dept: picked[0]?.department || 'General',
         assigned_user_ids: f.assignees,
-        firm_id: f.firmId || null,
+        // First firm picked is the primary firm; every picked firm is kept in firm_ids
+        firm_id: f.firmIds[0] || null,
+        firm_ids: f.firmIds.length ? f.firmIds : null,
         assigned_by: uid,
         created_by: uid,
         creator_id: uid,
@@ -1358,31 +1361,53 @@ function CreateTaskModal({
           <div>
             <label className={labelCls}>Firm</label>
             {canPickFirm && firms.length > 0 ? (
-              <select
-                className={inputCls}
-                value={f.firmId}
-                onChange={e => {
-                  const firmId = e.target.value;
-                  // Drop anyone picked from another firm
-                  setF(p => ({
-                    ...p,
-                    firmId,
-                    assignees: p.assignees.filter(id => users.find(u => u.id === id)?.firm_id === firmId),
-                  }));
-                }}
-              >
-                {firms.map(fm => <option key={fm.id} value={fm.id}>{fm.name}{fm.id === ownFirmId ? ' (my firm)' : ''}</option>)}
-              </select>
+              <div className="flex flex-wrap gap-1.5">
+                {firms.map(fm => {
+                  const on = f.firmIds.includes(fm.id);
+                  return (
+                    <button
+                      key={fm.id}
+                      type="button"
+                      onClick={() => setF(p => {
+                        const firmIds = p.firmIds.includes(fm.id)
+                          ? p.firmIds.filter(x => x !== fm.id)
+                          : [...p.firmIds, fm.id];
+                        // Drop anyone whose firm is no longer picked
+                        return {
+                          ...p,
+                          firmIds,
+                          assignees: p.assignees.filter(id => {
+                            const firmOfUser = users.find(u => u.id === id)?.firm_id;
+                            return firmIds.length === 0 || (!!firmOfUser && firmIds.includes(firmOfUser));
+                          }),
+                        };
+                      })}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                        on
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                      }`}
+                    >
+                      {fm.name}{fm.id === ownFirmId ? ' (my firm)' : ''}
+                    </button>
+                  );
+                })}
+              </div>
             ) : (
               <p className="text-sm text-slate-700 dark:text-slate-200 px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
                 {firms.find(fm => fm.id === ownFirmId)?.name || 'My firm'}
+              </p>
+            )}
+            {canPickFirm && (
+              <p className="text-[11px] text-slate-400 mt-1">
+                {f.firmIds.length === 0 ? 'Pick one or more firms' : `${f.firmIds.length} firm${f.firmIds.length > 1 ? 's' : ''} selected`}
               </p>
             )}
           </div>
           <div>
             <label className={labelCls}>Assign to (one or more)</label>
             <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto">
-              {users.filter(u => !f.firmId || u.firm_id === f.firmId).map(u => {
+              {users.filter(u => f.firmIds.length === 0 || (!!u.firm_id && f.firmIds.includes(u.firm_id))).map(u => {
                 const on = f.assignees.includes(u.id);
                 return (
                   <button
@@ -1533,7 +1558,9 @@ export default function TasksHub() {
         if (!isDirector) {
           const { data: firmIds, error: fe } = await supabase.rpc('get_visible_firm_ids', { p_user_id: uid, p_module: 'tasks' });
           if (fe || !firmIds || firmIds.length === 0) throw new Error('Could not work out which firm(s) you can see');
-          q = q.in('firm_id', firmIds);
+          // A task shows if its primary firm OR any of its firms (firm_ids) is visible to you
+          const fl = (firmIds as string[]).join(',');
+          q = q.or(`firm_id.in.(${fl}),firm_ids.ov.{${fl}}`);
         }
         const { data, error } = await q;
         if (error) throw error;
@@ -1663,12 +1690,13 @@ export default function TasksHub() {
       invite: !!t.__invite,
       collabs: (t.__collabs || []).map((c: any) => ({ name: userMap[c.user_id] || 'Unknown', status: c.status || 'accepted' })),
       firm_id: t.firm_id || null,
+      firm_ids: t.firm_ids || (t.firm_id ? [t.firm_id] : null),
     };
   }).filter(r => r.status !== 'cancelled'), [rawTasks, userMap, catMap, catSlugMap, clientMap, uid, userName]);
 
   /* ── derived: type filter → KPIs → visible list ── */
   const firmRows = useMemo(
-    () => (firmF === 'all' ? rows : rows.filter(r => r.firm_id === firmF)),
+    () => (firmF === 'all' ? rows : rows.filter(r => r.firm_id === firmF || (r.firm_ids || []).includes(firmF))),
     [rows, firmF]
   );
 
