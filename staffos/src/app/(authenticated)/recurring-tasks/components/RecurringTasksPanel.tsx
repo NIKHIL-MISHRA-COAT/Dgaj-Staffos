@@ -39,6 +39,7 @@ interface RecurringTask {
 
 interface FirmOption { id: string; name: string; firm_type: string; }
 interface ClientOption { id: string; name: string; }
+interface SubtaskDraft { id?: string; title: string; assigned_to: string; }
 
 interface TaskInstance {
   id: string;
@@ -88,6 +89,7 @@ const emptyForm = {
   weekday_only: false, priority: 'medium' as Priority,
   // Firms picked (several allowed); client_pick = "client:<id>" | "firm:<id>" | "" (Internal)
   firm_ids: [] as string[], client_pick: '',
+  subtasks: [] as SubtaskDraft[],
 };
 
 export default function RecurringTasksPanel() {
@@ -217,6 +219,7 @@ export default function RecurringTasksPanel() {
       end_date: t.end_date || '', custom_interval_days: t.custom_interval_days || 7,
       weekday_only: t.weekday_only, priority: t.priority || 'medium',
       firm_ids: t.firm_ids?.length ? t.firm_ids : (t.firm_id ? [t.firm_id] : []),
+      subtasks: [],
       client_pick: t.client_org_id
         ? `client:${t.client_org_id}`
         : (() => {
@@ -226,6 +229,14 @@ export default function RecurringTasksPanel() {
     });
     setEditingId(t.id);
     setShowForm(true);
+    // Load this template's subtasks into the form
+    supabase.from('recurring_subtasks').select('id, title, assigned_to, sort_order').eq('recurring_task_id', t.id).order('sort_order')
+      .then(({ data }) => setForm((f) => ({
+        ...f,
+        subtasks: ((data || []) as { id: string; title: string; assigned_to: string | null }[]).map((s) => ({
+          id: s.id, title: s.title, assigned_to: s.assigned_to || '',
+        })),
+      })));
   };
 
   const handleSave = async () => {
@@ -274,6 +285,28 @@ export default function RecurringTasksPanel() {
         if (error) throw error;
         taskId = data.id;
         toast.success('Recurring task created');
+      }
+
+      // Save subtasks: update kept ones (keeps their id and progress), insert new, delete removed
+      if (taskId) {
+        const keep = form.subtasks.filter((s) => s.title.trim());
+        if (editingId) {
+          const { data: existing } = await supabase.from('recurring_subtasks').select('id').eq('recurring_task_id', taskId);
+          const keepIds = keep.map((s) => s.id).filter(Boolean) as string[];
+          const removed = ((existing || []) as { id: string }[]).map((r) => r.id).filter((id) => !keepIds.includes(id));
+          if (removed.length > 0) {
+            const { error: delErr } = await supabase.from('recurring_subtasks').delete().in('id', removed);
+            if (delErr) throw delErr;
+          }
+        }
+        for (let i = 0; i < keep.length; i++) {
+          const s = keep[i];
+          const row = { recurring_task_id: taskId, title: s.title.trim(), assigned_to: s.assigned_to || null, sort_order: i };
+          const { error: subErr } = s.id
+            ? await supabase.from('recurring_subtasks').update(row).eq('id', s.id)
+            : await supabase.from('recurring_subtasks').insert(row);
+          if (subErr) throw subErr;
+        }
       }
 
       // Immediately generate the next 30 days of instances so the schedule
@@ -668,6 +701,49 @@ export default function RecurringTasksPanel() {
                       <span className="text-slate-700 dark:text-slate-200">{u.full_name}</span>
                       <span className="text-[10px] text-slate-400 ml-auto">{u.department || u.role}</span>
                     </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Subtasks: each has its own title and assignee; every occurrence gets its own tick */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-600 text-slate-700 dark:text-slate-300">Subtasks</label>
+                  <button type="button"
+                    onClick={() => setForm((f) => ({ ...f, subtasks: [...f.subtasks, { title: '', assigned_to: '' }] }))}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 flex items-center gap-1">
+                    <Plus size={12} /> Add subtask
+                  </button>
+                </div>
+                {form.subtasks.length === 0 && (
+                  <p className="text-[11px] text-slate-400">No subtasks yet.</p>
+                )}
+                <div className="space-y-2">
+                  {form.subtasks.map((s, i) => (
+                    <div key={s.id || `new-${i}`} className="grid grid-cols-12 gap-2 items-center">
+                      <input
+                        className="input-field col-span-6"
+                        placeholder="Subtask title"
+                        value={s.title}
+                        onChange={(e) => setForm((f) => ({ ...f, subtasks: f.subtasks.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)) }))}
+                      />
+                      <select
+                        className="input-field col-span-5 appearance-none cursor-pointer"
+                        value={s.assigned_to}
+                        onChange={(e) => setForm((f) => ({ ...f, subtasks: f.subtasks.map((x, j) => (j === i ? { ...x, assigned_to: e.target.value } : x)) }))}
+                      >
+                        <option value="">Same as task</option>
+                        {allUsers
+                          .filter((u) => form.firm_ids.length === 0 || (!!u.firm_id && form.firm_ids.includes(u.firm_id)))
+                          .map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                      </select>
+                      <button type="button"
+                        onClick={() => setForm((f) => ({ ...f, subtasks: f.subtasks.filter((_, j) => j !== i) }))}
+                        className="col-span-1 flex justify-center text-red-500 hover:text-red-600"
+                        aria-label="Remove subtask">
+                        <X size={14} />
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>

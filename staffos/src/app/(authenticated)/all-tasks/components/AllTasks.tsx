@@ -766,6 +766,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import TaskSubtasks from '@/components/TaskSubtasks';
 import {
   CheckCircle2, Circle, AlertTriangle, Clock, Flag, Repeat, Users, Calendar, CalendarDays,
   Loader2, RefreshCw, Plus, ArrowLeft, Search, X, SlidersHorizontal, ChevronDown, Zap,
@@ -1129,6 +1130,12 @@ function TaskRow({
                 <div><p className="text-slate-400">Est. hours</p><p className="font-medium text-slate-700 dark:text-slate-200">{row.est_hours > 0 ? `${row.est_hours}h` : '—'}</p></div>
               </div>
 
+              {row.source === 'task' && (
+                <div className="rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-3">
+                  <TaskSubtasks taskId={row.id} />
+                </div>
+              )}
+
               {row.source === 'task' ? (
                 <div className="flex flex-wrap gap-1.5">
                   {(['not_started', 'in_progress', 'waiting', 'blocked', 'completed'] as TaskStatus[]).map(s => (
@@ -1229,6 +1236,8 @@ function CreateTaskModal({
     due_date: '', due_time: '', recurring: '', category_id: '',
     // Client picker value: "client:<id>" (client organisation), "firm:<id>" (subsidiary) or "" (Internal)
     pick: '',
+    // Subtasks added on the form (title + optional assignee)
+    subtasks: [] as { title: string; assigned_to: string }[],
   });
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }));
 
@@ -1266,7 +1275,7 @@ function CreateTaskModal({
       const cat = categories.find(c => c.id === f.category_id);
       const org = f.pick.startsWith('client:') ? clients.find(c => c.id === f.pick.slice(7)) : undefined;
       const sub = f.pick.startsWith('firm:') ? subs.find(s => s.id === f.pick.slice(5)) : undefined;
-      const { error } = await supabase.from('tasks').insert({
+      const { data: createdTask, error } = await supabase.from('tasks').insert({
         title: f.title.trim(),
         description: f.description,
         priority: f.priority,
@@ -1300,8 +1309,22 @@ function CreateTaskModal({
         client_org_id: org?.id || null,
         client_org_name: org?.name || null,
         organisation_relates_to: org?.name || sub?.name || null,
-      });
+      }).select('id').single();
       if (error) throw error;
+
+      // Subtasks: one row each, linked to the new task
+      const subs = f.subtasks.filter(s => s.title.trim());
+      if (subs.length > 0 && createdTask?.id) {
+        const { error: subErr } = await supabase.from('task_subtasks').insert(
+          subs.map((s, i) => ({
+            task_id: createdTask.id,
+            title: s.title.trim(),
+            assigned_to: s.assigned_to || null,
+            sort_order: i,
+          })),
+        );
+        if (subErr) toast.error(`Task created, but subtasks failed: ${subErr.message}`);
+      }
       toast.success('Task created');
       onCreated();
       onClose();
@@ -1433,6 +1456,31 @@ function CreateTaskModal({
             <p className="text-[11px] text-slate-400 mt-1">
               {f.assignees.length === 0 ? 'Unassigned' : `${f.assignees.length} selected`}
             </p>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className={labelCls + ' mb-0'}>Subtasks</label>
+              <button type="button" onClick={() => setF(p => ({ ...p, subtasks: [...p.subtasks, { title: '', assigned_to: '' }] }))}
+                className="text-xs font-semibold text-blue-600 hover:text-blue-700">+ Add subtask</button>
+            </div>
+            {f.subtasks.length === 0 && <p className="text-[11px] text-slate-400">No subtasks yet.</p>}
+            <div className="space-y-2">
+              {f.subtasks.map((s, i) => (
+                <div key={i} className="grid grid-cols-12 gap-2 items-center">
+                  <input className={inputCls + ' col-span-6'} placeholder="Subtask title" value={s.title}
+                    onChange={e => setF(p => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)) }))} />
+                  <select className={inputCls + ' col-span-5'} value={s.assigned_to}
+                    onChange={e => setF(p => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, assigned_to: e.target.value } : x)) }))}>
+                    <option value="">Same as task</option>
+                    {users.filter(u => f.firmIds.length === 0 || (!!u.firm_id && f.firmIds.includes(u.firm_id))).map(u => (
+                      <option key={u.id} value={u.id}>{u.full_name}</option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={() => setF(p => ({ ...p, subtasks: p.subtasks.filter((_, j) => j !== i) }))}
+                    className="col-span-1 flex justify-center text-red-500 hover:text-red-600" aria-label="Remove subtask">×</button>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>

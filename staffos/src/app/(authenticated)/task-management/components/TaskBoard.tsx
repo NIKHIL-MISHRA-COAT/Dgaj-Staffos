@@ -8,6 +8,7 @@ import { createClient } from '@/lib/supabase/client';
 import ClientOrganisations from './ClientOrganisations';
 import TaskCategoryManager from './TaskCategoryManager';
 import { useLanguage } from '@/contexts/LanguageContext';
+import TaskSubtasks from '@/components/TaskSubtasks';
 
 type Priority = 'critical' | 'high' | 'medium' | 'low';
 type TaskStatus = 'todo' | 'in-progress' | 'review' | 'done' | 'overdue';
@@ -54,6 +55,11 @@ interface Task {
   created_at?: string;
   assigned_by?: string | null;
 }
+
+// Local calendar date as YYYY-MM-DD. Do not use toISOString() for dates: it
+// converts to UTC, which moves India (IST) dates back a day.
+const ymdLocal = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 interface UserProfile {
   id: string;
@@ -125,6 +131,7 @@ interface NewTaskForm {
   dueTime: string;
   assignedToDept: string;
   firmIds: string[];
+  subtasks: { title: string; assigned_to: string }[];
   assignedUserIds: string[];
   recurring: string;
   notifyBefore: number;
@@ -141,7 +148,7 @@ interface NewTaskForm {
 
 const defaultForm: NewTaskForm = {
   title: '', description: '', priority: 'medium', dueDate: '', dueTime: '',
-  assignedToDept: '', firmIds: [], assignedUserIds: [], recurring: '', notifyBefore: 30, reminderTimes: [],
+  assignedToDept: '', firmIds: [], subtasks: [], assignedUserIds: [], recurring: '', notifyBefore: 30, reminderTimes: [],
     checklistItems: [''], organisationRelatesTo: '', clientOrgId: '', taskCategory: 'general',
   helperUserIds: [], collaboratorUserIds: [], isFlagged: false, flagReason: '',
 };
@@ -432,7 +439,7 @@ export default function TaskBoard() {
       case 'hourly': d.setHours(d.getHours() + 1); break;
       default: d.setDate(d.getDate() + 1); break;
     }
-    return d.toISOString().split('T')[0];
+    return ymdLocal(d);
   }, []);
 
   // Reset recurring tasks that were completed on a previous day — make them fresh again
@@ -441,7 +448,7 @@ export default function TaskBoard() {
   // Tasks with spawned_from_task_id use the new spawn system — they stay completed as history.
   // Tasks WITHOUT last_completed_date are NEVER reset — they remain as overdue/pending history.
   const resetRecurringTasksIfNeeded = useCallback(async (loadedTasks: Task[]) => {
-    const today = new Date().toISOString().split('T')[0];
+    const today = ymdLocal(new Date());
     const tasksToReset = loadedTasks.filter((t) => {
       if (!t.recurring) return false;
       if (t.status !== 'done') return false;
@@ -837,6 +844,20 @@ export default function TaskBoard() {
 
             const { data: insertedTask, error } = await supabase.from('tasks').insert(taskData).select().single();
       if (error) throw error;
+
+      // Subtasks: one row each, linked to the new task
+      const subs = newTask.subtasks.filter((s) => s.title.trim());
+      if (subs.length > 0 && insertedTask?.id) {
+        const { error: subErr } = await supabase.from('task_subtasks').insert(
+          subs.map((s, i) => ({
+            task_id: insertedTask.id,
+            title: s.title.trim(),
+            assigned_to: s.assigned_to || null,
+            sort_order: i,
+          })),
+        );
+        if (subErr) toast.error(`Task created, but subtasks failed: ${subErr.message}`);
+      }
 
       // Send pending collaboration requests, same as the "afterward" flow —
       // they still need to accept, same as if invited after creation.
@@ -2165,6 +2186,9 @@ export default function TaskBoard() {
                     {task.description && (
                       <p className="text-sm text-slate-600 dark:text-slate-300 mb-4 leading-relaxed">{task.description}</p>
                     )}
+                    <div className="bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-200 dark:border-slate-700 mb-4">
+                      <TaskSubtasks taskId={task.id} />
+                    </div>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-xs">
                       <div className="bg-white dark:bg-slate-800 rounded-lg p-3 border border-slate-200 dark:border-slate-700">
                         <p className="text-slate-400 mb-1">{language === 'hi' ? 'द्वारा सौंपा गया' : 'Assigned by'}</p>
@@ -2561,6 +2585,35 @@ export default function TaskBoard() {
                     <input type="time" value={newTask.dueTime} onChange={(e) => setNewTask({ ...newTask, dueTime: e.target.value })}
                       className="input-field pl-8" />
                   </div>
+                </div>
+              </div>
+
+              {/* Subtasks: each has its own title and assignee */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-600 text-slate-700 dark:text-slate-300">Subtasks</label>
+                  <button type="button"
+                    onClick={() => setNewTask((p) => ({ ...p, subtasks: [...p.subtasks, { title: '', assigned_to: '' }] }))}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700">+ Add subtask</button>
+                </div>
+                {newTask.subtasks.length === 0 && <p className="text-[11px] text-slate-400">No subtasks yet.</p>}
+                <div className="space-y-2">
+                  {newTask.subtasks.map((s, i) => (
+                    <div key={i} className="grid grid-cols-12 gap-2 items-center">
+                      <input className="input-field col-span-6" placeholder="Subtask title" value={s.title}
+                        onChange={(e) => setNewTask((p) => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)) }))} />
+                      <select className="input-field col-span-5" value={s.assigned_to}
+                        onChange={(e) => setNewTask((p) => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, assigned_to: e.target.value } : x)) }))}>
+                        <option value="">Same as task</option>
+                        {allUsers
+                          .filter((u) => newTask.firmIds.length === 0 || (!!u.firm_id && newTask.firmIds.includes(u.firm_id)))
+                          .map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                      </select>
+                      <button type="button"
+                        onClick={() => setNewTask((p) => ({ ...p, subtasks: p.subtasks.filter((_, j) => j !== i) }))}
+                        className="col-span-1 flex justify-center text-red-500 hover:text-red-600" aria-label="Remove subtask">×</button>
+                    </div>
+                  ))}
                 </div>
               </div>
 
