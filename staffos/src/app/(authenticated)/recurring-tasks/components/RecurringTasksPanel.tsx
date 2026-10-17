@@ -524,7 +524,8 @@ export default function RecurringTasksPanel() {
                 const StatusIcon = s.icon;
                 const mine = inst.assigned_to === effectiveUserId;
                 return (
-                  <div key={inst.id} className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+                  <div key={inst.id} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+                  <div className="flex items-center gap-3 p-3">
                     <StatusIcon size={16} className={s.className.includes('red') ? 'text-red-500' : s.className.includes('emerald') ? 'text-emerald-500' : s.className.includes('blue') ? 'text-blue-500' : 'text-slate-400'} />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-600 text-slate-800 dark:text-slate-100 truncate">{inst.task_name}</div>
@@ -543,6 +544,13 @@ export default function RecurringTasksPanel() {
                         <button onClick={() => updateInstanceStatus(inst, 'completed')} className="text-[11px] px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100">Complete</button>
                       </div>
                     )}
+                  </div>
+                  {/* Each occurrence has its own subtask ticks, independent of other days */}
+                  <InstanceSubtasks
+                    instanceId={inst.id}
+                    templateId={inst.recurring_task_id}
+                    readOnly={!(mine && inst.status !== 'completed' && inst.status !== 'cancelled')}
+                  />
                   </div>
                 );
               })}
