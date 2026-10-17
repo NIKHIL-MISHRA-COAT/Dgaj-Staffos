@@ -31,7 +31,14 @@ interface RecurringTask {
   priority: Priority;
   created_by: string | null;
   created_at: string;
+  firm_id?: string | null;
+  firm_ids?: string[] | null;
+  client_org_id?: string | null;
+  organisation_relates_to?: string | null;
 }
+
+interface FirmOption { id: string; name: string; firm_type: string; }
+interface ClientOption { id: string; name: string; }
 
 interface TaskInstance {
   id: string;
@@ -49,7 +56,7 @@ interface TaskInstance {
   user_profiles?: { full_name: string; department: string | null };
 }
 
-interface UserOption { id: string; full_name: string; role: string; department: string | null; }
+interface UserOption { id: string; full_name: string; role: string; department: string | null; firm_id?: string | null; }
 
 const FREQUENCY_LABELS: Record<Frequency, string> = {
   daily: 'Daily', weekday: 'Weekdays only', weekly: 'Weekly', fortnightly: 'Fortnightly',
@@ -70,11 +77,17 @@ const STATUS_STYLE: Record<InstanceStatus, { label: string; className: string; i
   cancelled: { label: 'Cancelled', className: 'bg-slate-100 text-slate-400', icon: X },
 };
 
+// Local calendar date as YYYY-MM-DD (toISOString() is UTC and shows yesterday in India before 5:30 am)
+const ymdLocal = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
 const emptyForm = {
   title: '', description: '', frequency: 'daily' as Frequency, assigned_to_users: [] as string[],
   department: '', time_limit_minutes: 60, notify_before_minutes: 30, due_time: '17:00',
-  start_date: new Date().toISOString().split('T')[0], end_date: '', custom_interval_days: 7,
+  start_date: ymdLocal(new Date()), end_date: '', custom_interval_days: 7,
   weekday_only: false, priority: 'medium' as Priority,
+  // Firms picked (several allowed); client_pick = "client:<id>" | "firm:<id>" | "" (Internal)
+  firm_ids: [] as string[], client_pick: '',
 };
 
 export default function RecurringTasksPanel() {
@@ -97,6 +110,8 @@ export default function RecurringTasksPanel() {
   const [instanceStatusFilter, setInstanceStatusFilter] = useState<'all' | InstanceStatus>('all');
   const [instanceScope, setInstanceScope] = useState<'mine' | 'all'>('mine');
   const [search, setSearch] = useState('');
+  const [firmOptions, setFirmOptions] = useState<FirmOption[]>([]);
+  const [clientOrgs, setClientOrgs] = useState<ClientOption[]>([]);
 
   const isManager = role === 'director' || role === 'manager' || role === 'executive';
 
@@ -147,9 +162,23 @@ export default function RecurringTasksPanel() {
     setInstances((data as any) || []);
   }, [effectiveUserId, instanceScope, instanceStatusFilter, isManager]);
 
+  // Firms the user can see (for the firm chips) and client organisations (for the client picker)
+  const fetchFirmsAndClients = useCallback(async () => {
+    if (!effectiveUserId) return;
+    const { data: ids } = await supabase.rpc('get_visible_firm_ids', { p_user_id: effectiveUserId, p_module: 'all' });
+    if (ids && (ids as string[]).length > 0) {
+      const { data } = await supabase.from('firms').select('id, name, firm_type').in('id', ids as string[]).order('name');
+      setFirmOptions((data || []) as FirmOption[]);
+    } else {
+      setFirmOptions([]);
+    }
+    const { data: orgs } = await supabase.from('client_organisations').select('id, name').order('name');
+    setClientOrgs((orgs || []) as ClientOption[]);
+  }, [effectiveUserId]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchTemplates(), fetchInstances(), fetchUsers()]);
+    await Promise.all([fetchTemplates(), fetchInstances(), fetchUsers(), fetchFirmsAndClients()]);
     setLoading(false);
   }, [fetchTemplates, fetchInstances, fetchUsers]);
 
@@ -187,6 +216,13 @@ export default function RecurringTasksPanel() {
       due_time: (t.due_time || '17:00:00').slice(0, 5), start_date: t.start_date || emptyForm.start_date,
       end_date: t.end_date || '', custom_interval_days: t.custom_interval_days || 7,
       weekday_only: t.weekday_only, priority: t.priority || 'medium',
+      firm_ids: t.firm_ids?.length ? t.firm_ids : (t.firm_id ? [t.firm_id] : []),
+      client_pick: t.client_org_id
+        ? `client:${t.client_org_id}`
+        : (() => {
+          const sub = firmOptions.find((f) => f.name === t.organisation_relates_to);
+          return sub ? `firm:${sub.id}` : '';
+        })(),
     });
     setEditingId(t.id);
     setShowForm(true);
@@ -198,11 +234,23 @@ export default function RecurringTasksPanel() {
     setSaving(true);
     try {
       const { data: creatorProfile } = await supabase.from('user_profiles').select('firm_id').eq('id', effectiveUserId).single();
+      // Client or subsidiary picked (same rule as normal tasks)
+      const pickedOrg = form.client_pick.startsWith('client:')
+        ? clientOrgs.find((o) => o.id === form.client_pick.slice(7))
+        : undefined;
+      const pickedFirm = form.client_pick.startsWith('firm:')
+        ? firmOptions.find((f) => f.id === form.client_pick.slice(5))
+        : undefined;
       const payload = {
         title: form.title.trim(),
         description: form.description || null,
         frequency: form.frequency,
-        firm_id: creatorProfile?.firm_id || null,
+        // First firm picked is the primary firm; every picked firm is kept in firm_ids
+        firm_id: form.firm_ids[0] || creatorProfile?.firm_id || null,
+        firm_ids: form.firm_ids.length ? form.firm_ids : (creatorProfile?.firm_id ? [creatorProfile.firm_id] : null),
+        client_org_id: pickedOrg?.id ?? null,
+        client_org_name: pickedOrg?.name ?? null,
+        organisation_relates_to: pickedOrg?.name ?? pickedFirm?.name ?? null,
         assigned_to_users: form.assigned_to_users,
         department: form.department || null,
         time_limit_minutes: form.time_limit_minutes,
@@ -234,7 +282,7 @@ export default function RecurringTasksPanel() {
         await supabase.rpc('generate_recurring_instances', {
           p_recurring_task_id: taskId,
           p_from_date: form.start_date,
-          p_to_date: new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
+          p_to_date: ymdLocal(new Date(Date.now() + 30 * 86400000)),
         });
       }
 
@@ -269,8 +317,8 @@ export default function RecurringTasksPanel() {
     try {
       const { data, error } = await supabase.rpc('generate_recurring_instances', {
         p_recurring_task_id: t.id,
-        p_from_date: new Date().toISOString().split('T')[0],
-        p_to_date: new Date(Date.now() + 60 * 86400000).toISOString().split('T')[0],
+        p_from_date: ymdLocal(new Date()),
+        p_to_date: ymdLocal(new Date(Date.now() + 60 * 86400000)),
       });
       if (error) throw error;
       toast.success(`Generated ${data ?? 0} new instance(s) for the next 60 days`);
@@ -516,11 +564,12 @@ export default function RecurringTasksPanel() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Start date</label>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Due date (first occurrence)</label>
                   <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} className="input-field" />
+                  <p className="text-[11px] text-slate-400 mt-1">Repeats are based on this due date.</p>
                 </div>
                 <div>
-                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">End date (optional)</label>
+                  <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Repeat up to (optional)</label>
                   <input type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} className="input-field" />
                 </div>
               </div>
@@ -541,10 +590,68 @@ export default function RecurringTasksPanel() {
                 Skip weekends
               </label>
 
+              {/* Firms: one or more; people below are members of the picked firms */}
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">
+                  Firms <span className="text-slate-400 font-400">(select one or more)</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {firmOptions.map((fm) => {
+                    const on = form.firm_ids.includes(fm.id);
+                    return (
+                      <button
+                        key={fm.id}
+                        type="button"
+                        onClick={() => setForm((f) => {
+                          const firm_ids = f.firm_ids.includes(fm.id)
+                            ? f.firm_ids.filter((x) => x !== fm.id)
+                            : [...f.firm_ids, fm.id];
+                          // Drop anyone whose firm is no longer picked
+                          const assigned_to_users = f.assigned_to_users.filter((id) => {
+                            const firmOfUser = allUsers.find((u) => u.id === id)?.firm_id;
+                            return firm_ids.length === 0 || (!!firmOfUser && firm_ids.includes(firmOfUser));
+                          });
+                          return { ...f, firm_ids, assigned_to_users };
+                        })}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                          on
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                        }`}
+                      >
+                        {fm.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  {form.firm_ids.length === 0 ? 'No firm picked: people from all firms are shown' : `${form.firm_ids.length} firm${form.firm_ids.length > 1 ? 's' : ''} selected`}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Client / Subsidiary</label>
+                <select value={form.client_pick} onChange={(e) => setForm({ ...form, client_pick: e.target.value })} className="input-field appearance-none cursor-pointer">
+                  <option value="">Internal</option>
+                  {firmOptions.some((f) => f.firm_type === 'subsidiary') && (
+                    <optgroup label="Subsidiaries">
+                      {firmOptions.filter((f) => f.firm_type === 'subsidiary').map((f) => (
+                        <option key={`firm:${f.id}`} value={`firm:${f.id}`}>{f.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {clientOrgs.length > 0 && (
+                    <optgroup label="Clients">
+                      {clientOrgs.map((o) => <option key={`client:${o.id}`} value={`client:${o.id}`}>{o.name}</option>)}
+                    </optgroup>
+                  )}
+                </select>
+              </div>
+
               <div>
                 <label className="block text-xs font-600 text-slate-700 dark:text-slate-300 mb-1.5">Assign to *</label>
                 <div className="max-h-40 overflow-y-auto border border-slate-200 dark:border-slate-600 rounded-xl p-2 space-y-1">
-                  {allUsers.map((u) => (
+                  {allUsers.filter((u) => form.firm_ids.length === 0 || (!!u.firm_id && form.firm_ids.includes(u.firm_id))).map((u) => (
                     <label key={u.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer text-sm">
                       <input
                         type="checkbox"
