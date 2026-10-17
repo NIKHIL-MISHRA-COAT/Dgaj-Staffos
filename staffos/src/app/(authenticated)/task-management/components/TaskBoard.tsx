@@ -9,6 +9,7 @@ import ClientOrganisations from './ClientOrganisations';
 import TaskCategoryManager from './TaskCategoryManager';
 import { useLanguage } from '@/contexts/LanguageContext';
 import TaskSubtasks from '@/components/TaskSubtasks';
+import InstanceSubtasks from '@/components/InstanceSubtasks';
 
 type Priority = 'critical' | 'high' | 'medium' | 'low';
 type TaskStatus = 'todo' | 'in-progress' | 'review' | 'done' | 'overdue';
@@ -852,7 +853,6 @@ export default function TaskBoard() {
           subs.map((s, i) => ({
             task_id: insertedTask.id,
             title: s.title.trim(),
-            assigned_to: s.assigned_to || null,
             sort_order: i,
           })),
         );
@@ -1766,6 +1766,7 @@ export default function TaskBoard() {
           source: 'task' | 'recurring';
           frequency?: string | null;
           sequence_number?: number;
+          recurring_task_id?: string | null; // recurring occurrences: template id (for its subtasks)
         }
 
         const mapTaskToUnified = (t: Task): UnifiedMyTask => ({
@@ -1794,6 +1795,7 @@ export default function TaskBoard() {
           source: 'recurring',
           frequency: i.frequency || null,
           sequence_number: i.sequence_number,
+          recurring_task_id: i.recurring_task_id || null,
         });
 
         const todayInstances = myRecurringInstances.filter(i => i.due_date === todayStr && i.status !== 'completed' && i.status !== 'cancelled');
@@ -1960,6 +1962,11 @@ export default function TaskBoard() {
                     {typeLabel}
                   </span>
                 </div>
+                {task.source === 'recurring' && task.recurring_task_id && (
+                  <div className="mt-2 rounded-lg bg-slate-50 dark:bg-slate-700/30 border border-slate-200 dark:border-slate-700 p-2.5">
+                    <InstanceSubtasks instanceId={task.id} templateId={task.recurring_task_id} />
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -2600,15 +2607,8 @@ export default function TaskBoard() {
                 <div className="space-y-2">
                   {newTask.subtasks.map((s, i) => (
                     <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                      <input className="input-field col-span-6" placeholder="Subtask title" value={s.title}
+                      <input className="input-field col-span-11" placeholder="Subtask title" value={s.title}
                         onChange={(e) => setNewTask((p) => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)) }))} />
-                      <select className="input-field col-span-5" value={s.assigned_to}
-                        onChange={(e) => setNewTask((p) => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, assigned_to: e.target.value } : x)) }))}>
-                        <option value="">Same as task</option>
-                        {allUsers
-                          .filter((u) => newTask.firmIds.length === 0 || (!!u.firm_id && newTask.firmIds.includes(u.firm_id)))
-                          .map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-                      </select>
                       <button type="button"
                         onClick={() => setNewTask((p) => ({ ...p, subtasks: p.subtasks.filter((_, j) => j !== i) }))}
                         className="col-span-1 flex justify-center text-red-500 hover:text-red-600" aria-label="Remove subtask">×</button>

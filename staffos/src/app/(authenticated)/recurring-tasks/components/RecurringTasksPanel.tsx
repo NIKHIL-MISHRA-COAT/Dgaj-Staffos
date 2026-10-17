@@ -8,6 +8,7 @@ import {
 import { toast, Toaster } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { createClient } from '@/lib/supabase/client';
+import InstanceSubtasks from '@/components/InstanceSubtasks';
 
 type Frequency = 'daily' | 'weekday' | 'weekly' | 'fortnightly' | 'bi-monthly' | 'monthly' | 'quarterly' | 'yearly' | 'custom';
 type InstanceStatus = 'pending' | 'in_progress' | 'completed' | 'overdue' | 'cancelled';
@@ -301,7 +302,7 @@ export default function RecurringTasksPanel() {
         }
         for (let i = 0; i < keep.length; i++) {
           const s = keep[i];
-          const row = { recurring_task_id: taskId, title: s.title.trim(), assigned_to: s.assigned_to || null, sort_order: i };
+          const row = { recurring_task_id: taskId, title: s.title.trim(), sort_order: i };
           const { error: subErr } = s.id
             ? await supabase.from('recurring_subtasks').update(row).eq('id', s.id)
             : await supabase.from('recurring_subtasks').insert(row);
@@ -730,21 +731,11 @@ export default function RecurringTasksPanel() {
                   {form.subtasks.map((s, i) => (
                     <div key={s.id || `new-${i}`} className="grid grid-cols-12 gap-2 items-center">
                       <input
-                        className="input-field col-span-6"
+                        className="input-field col-span-11"
                         placeholder="Subtask title"
                         value={s.title}
                         onChange={(e) => setForm((f) => ({ ...f, subtasks: f.subtasks.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)) }))}
                       />
-                      <select
-                        className="input-field col-span-5 appearance-none cursor-pointer"
-                        value={s.assigned_to}
-                        onChange={(e) => setForm((f) => ({ ...f, subtasks: f.subtasks.map((x, j) => (j === i ? { ...x, assigned_to: e.target.value } : x)) }))}
-                      >
-                        <option value="">Same as task</option>
-                        {allUsers
-                          .filter((u) => form.firm_ids.length === 0 || (!!u.firm_id && form.firm_ids.includes(u.firm_id)))
-                          .map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
-                      </select>
                       <button type="button"
                         onClick={() => setForm((f) => ({ ...f, subtasks: f.subtasks.filter((_, j) => j !== i) }))}
                         className="col-span-1 flex justify-center text-red-500 hover:text-red-600"

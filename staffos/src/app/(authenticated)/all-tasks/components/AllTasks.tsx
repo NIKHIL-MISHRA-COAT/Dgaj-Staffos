@@ -767,6 +767,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import TaskSubtasks from '@/components/TaskSubtasks';
+import InstanceSubtasks from '@/components/InstanceSubtasks';
 import {
   CheckCircle2, Circle, AlertTriangle, Clock, Flag, Repeat, Users, Calendar, CalendarDays,
   Loader2, RefreshCw, Plus, ArrowLeft, Search, X, SlidersHorizontal, ChevronDown, Zap,
@@ -817,6 +818,7 @@ interface Row {
   collabs: { name: string; status: string }[]; // other people attached to the task (accepted or requested)
   firm_id: string | null;
   firm_ids: string[] | null; // every firm the task belongs to (firm_id is the primary one)
+  recurring_task_id?: string | null; // for recurring occurrences: the template they belong to (its subtasks)
 }
 
 interface UserProfile { id: string; full_name: string; role: string; department: string | null; firm_id?: string | null; }
@@ -1154,7 +1156,18 @@ function TaskRow({
                   ))}
                 </div>
               ) : (
-                <p className="text-xs text-slate-400">Recurring instance — tick the circle to mark it done.</p>
+                <div className="space-y-2">
+                  {row.recurring_task_id && (
+                    <div className="rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-3">
+                      <InstanceSubtasks
+                        instanceId={row.id}
+                        templateId={row.recurring_task_id}
+                        readOnly={row.status === 'completed' || row.status === 'cancelled'}
+                      />
+                    </div>
+                  )}
+                  <p className="text-xs text-slate-400">Recurring instance — tick the circle to mark it done.</p>
+                </div>
               )}
 
               {row.invite && (
@@ -1319,7 +1332,6 @@ function CreateTaskModal({
           subs.map((s, i) => ({
             task_id: createdTask.id,
             title: s.title.trim(),
-            assigned_to: s.assigned_to || null,
             sort_order: i,
           })),
         );
@@ -1467,15 +1479,8 @@ function CreateTaskModal({
             <div className="space-y-2">
               {f.subtasks.map((s, i) => (
                 <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                  <input className={inputCls + ' col-span-6'} placeholder="Subtask title" value={s.title}
+                  <input className={inputCls + ' col-span-11'} placeholder="Subtask title" value={s.title}
                     onChange={e => setF(p => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)) }))} />
-                  <select className={inputCls + ' col-span-5'} value={s.assigned_to}
-                    onChange={e => setF(p => ({ ...p, subtasks: p.subtasks.map((x, j) => (j === i ? { ...x, assigned_to: e.target.value } : x)) }))}>
-                    <option value="">Same as task</option>
-                    {users.filter(u => f.firmIds.length === 0 || (!!u.firm_id && f.firmIds.includes(u.firm_id))).map(u => (
-                      <option key={u.id} value={u.id}>{u.full_name}</option>
-                    ))}
-                  </select>
                   <button type="button" onClick={() => setF(p => ({ ...p, subtasks: p.subtasks.filter((_, j) => j !== i) }))}
                     className="col-span-1 flex justify-center text-red-500 hover:text-red-600" aria-label="Remove subtask">×</button>
                 </div>
@@ -1712,6 +1717,7 @@ export default function TasksHub() {
         blocked: false, progress: 0, est_hours: 0,
         completed_at: t.completion_datetime || null, created_at: t.created_at || '', collaborator: false, firm_id: null,
         mine: true, invite: false, collabs: [],
+        recurring_task_id: t.recurring_task_id || null,
       };
     }
     const ids: string[] = Array.isArray(t.assigned_user_ids) ? t.assigned_user_ids : [];
